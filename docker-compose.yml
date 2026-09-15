@@ -1,0 +1,52 @@
+# Self-contained stack (architecture.md §5d). `docker compose up` brings up
+# Postgres (schema auto-created from migrations/), the FastAPI service, and n8n.
+# n8n's workflow (Phase 3B) is imported once the MCP tooling is reconnected.
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: lq
+      POSTGRES_PASSWORD: lq
+      POSTGRES_DB: lead_qualifier
+    # Migration runs automatically on first boot.
+    volumes:
+      - ./migrations/001_init.sql:/docker-entrypoint-initdb.d/001_init.sql:ro
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U lq -d lead_qualifier"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  api:
+    build: .
+    environment:
+      LQ_PERSISTENCE: postgres
+      LQ_DATABASE_URL: postgresql://lq:lq@postgres:5432/lead_qualifier
+      LQ_LLM_PROVIDER: ${LQ_LLM_PROVIDER:-mock}
+      LQ_LLM_MODEL: ${LQ_LLM_MODEL:-claude-haiku-4-5}
+      LQ_ANTHROPIC_API_KEY: ${LQ_ANTHROPIC_API_KEY:-}
+      LQ_WEBHOOK_AUTH_TOKEN: ${LQ_WEBHOOK_AUTH_TOKEN:-}
+      LQ_DAILY_COST_CEILING_USD: ${LQ_DAILY_COST_CEILING_USD:-5.0}
+    depends_on:
+      postgres:
+        condition: service_healthy
+    ports:
+      - "8000:8000"
+
+  n8n:
+    image: n8nio/n8n:latest
+    environment:
+      N8N_SECURE_COOKIE: "false"
+      GENERIC_TIMEZONE: Europe/Lisbon
+    ports:
+      - "5678:5678"
+    volumes:
+      - n8ndata:/home/node/.n8n
+    depends_on:
+      - api
+
+volumes:
+  pgdata:
+  n8ndata:
