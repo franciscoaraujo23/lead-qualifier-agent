@@ -201,10 +201,12 @@ If you want any of these changed, they're isolated to config and the Switch node
 
 ## 9. Phase 3B build notes — where the implementation diverged, and why
 
-The workflow lives in `n8n/lead-qualifier-main.json` (26 nodes) and
-`n8n/lead-qualifier-error-handler.json`. Five decisions departed from the
+The workflow lives in `n8n/lead-qualifier-main.json` (27 nodes) and
+`n8n/lead-qualifier-error-handler.json`. Seven decisions departed from the
 letter of this document while keeping its intent. Each is recorded here because
-the reasoning is the point of the piece.
+the reasoning is the point of the piece. The last two were forced by running the
+thing on a real n8n rather than by reasoning about it — which is the argument for
+having done so.
 
 ### 9.1 The transport retry is hand-built, not the HTTP node's `retryOnFail`
 
@@ -281,6 +283,49 @@ being hardcoded in the Switch node. The API already computes `tier` from
 of ownership is exact: the API owns *where the lines are*, n8n owns *what each
 tier does*. Cold is the Switch's fallback output, so an unexpected tier
 degrades to the branch with no side effects rather than dropping the lead.
+
+### 9.6 The workflow reads no environment variables
+
+The first version took its configuration from `$env`: the auth token, the API
+URL, the retry bound, the hot-path webhook. It failed on the first real request
+with `access to env vars denied`. n8n runs Code nodes inside a sandboxed task
+runner, and that sandbox denies env access unless the host has been specially
+configured.
+
+The fix could have been "set these variables on the n8n host". That was
+rejected: a workflow that only runs after you SSH into a server and set three
+obscure variables is not reproducible, and reproducibility is this repo's stated
+quality signal (§5d). The configuration was split by what it actually is:
+
+- **Secrets** became real n8n credentials. The webhook's shared secret is now a
+  Header Auth credential on the *webhook node itself*, so a missing or wrong
+  token is rejected by n8n **before the workflow starts** — no execution record,
+  no database write, no spend. That is strictly earlier than the code-level check
+  it replaced, and the token never appears in the exported JSON. The same
+  credential authenticates the outbound call to `/qualify`, so one rotation
+  covers both hops. The cost: n8n answers `403` here, not the `401` §4.7 names.
+  That is the node's behaviour, and it was worth taking.
+- **Everything else** became a `Config` node at the head of the workflow —
+  `api_url`, `max_attempts`, `hot_path_webhook_url` — which downstream nodes read
+  with `$('Config')`. One visible place, no host coupling, and a reviewer can see
+  the knobs without leaving the canvas.
+
+A consequence worth noting: the webhook is no longer open when unconfigured. The
+earlier "open if no token is set" behaviour was a softening this document never
+asked for — §4.7 requires the token and documents it in the README precisely so a
+reviewer can still try the demo.
+
+### 9.7 The Postgres node is pinned to typeVersion 2.6
+
+Activation failed with `Cannot read properties of undefined (reading 'execute')`
+— an error that names no node. Bisecting with throwaway single-node workflows
+found it: the instance ships Postgres node 2.6, and the workflow asked for 2.7.
+Every other node version in the workflow was accepted.
+
+Pinned to 2.6, which costs nothing here — `queryReplacement`, the only node
+feature these statements rely on, has existed since 2.4. The general point is
+that the newest typeVersion is not a safe default for a workflow meant to be
+imported into someone else's n8n.
 
 ---
 

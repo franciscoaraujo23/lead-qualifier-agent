@@ -15,9 +15,24 @@
         "httpMethod": "POST",
         "path": "lead",
         "responseMode": "responseNode",
-        "options": {}
+        "options": {},
+        "authentication": "headerAuth"
       },
-      "notes": "Entry point. {\"domain\": \"acme.com\", \"idempotency_key\": \"<optional>\"} with an X-Auth-Token header. Responds via Respond-to-Webhook nodes so every exit path returns an explicit, typed status."
+      "notes": "Entry point. {\"domain\": \"acme.com\", \"idempotency_key\": \"<optional>\"}.\n\n§4.7 auth is enforced by the node itself via a Header Auth credential, so a missing or wrong token is rejected by n8n BEFORE the workflow starts — no execution, no DB write, no LLM spend. That is strictly earlier than checking it in code, and it keeps the secret in a credential instead of the exported JSON. n8n answers 403 here rather than the 401 the architecture names; that is the node's behaviour, not a choice.\n\nResponds via Respond-to-Webhook nodes so every other exit path returns an explicit, typed status."
+    },
+    {
+      "id": "code-config",
+      "name": "Config",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -350,
+        300
+      ],
+      "parameters": {
+        "jsCode": "// Every tunable the orchestration layer needs, in one readable place.\n//\n// This deliberately reads no environment variables. n8n task runners sandbox\n// Code nodes and deny env access, so such a workflow only runs on a host that\n// has been specially configured, which defeats the point of shipping the JSON.\n// Anything secret lives in a credential instead (the webhook token, the\n// database); what is left is plain configuration, and it belongs somewhere a\n// reviewer can see.\n//\n// Thresholds are absent on purpose: hot/warm/cold cutoffs live in the API's\n// config.py and reach us as `tier` (§8).\n\nreturn [{\n  json: {\n    // Where the domain service lives, as seen from n8n.\n    api_url: 'http://api:8000',\n\n    // Transport-retry bound (§4.2). Backoff is 2^attempt seconds: 2s, then 4s.\n    max_attempts: 3,\n\n    // Optional hot-path action (§8). Empty = the documented no-op default.\n    hot_path_webhook_url: '',\n  },\n}];"
+      },
+      "notes": "The workflow's one configuration surface. No secrets here — those are credentials."
     },
     {
       "id": "code-validate",
@@ -29,78 +44,15 @@
         300
       ],
       "parameters": {
-        "jsCode": "// Gate + normalise before any billable work happens (§4.7).\n//\n// Auth: shared secret compared against LQ_WEBHOOK_AUTH_TOKEN. If that env var\n// is unset the webhook is open, which mirrors the FastAPI service's behaviour\n// so `docker compose up` works with no keys at all.\n//\n// Idempotency key: client-supplied, else derived as `domain:YYYY-MM-DD`.\n// A readable composite beats a hash here — same collapsing behaviour for\n// accidental duplicate submissions inside the day bucket, but a reviewer can\n// read the key straight out of the table.\n\nconst expected = ($env.LQ_WEBHOOK_AUTH_TOKEN || '').trim();\nconst out = [];\n\nfor (const item of $input.all()) {\n  const headers = item.json.headers || {};\n  const body = item.json.body || {};\n\n  const supplied = String(headers['x-auth-token'] || '');\n  const authorized = expected === '' || supplied === expected;\n\n  // Same normalisation as QualifyRequest._normalize_domain in the API, so the\n  // idempotency key is derived from the identical string the API scores.\n  let domain = String(body.domain || '').trim().toLowerCase();\n  domain = domain.replace(/^https?:\\/\\//, '').split('/')[0];\n  const valid_domain = domain.length >= 3 && domain.includes('.');\n\n  const bucket = new Date().toISOString().slice(0, 10);\n  const idempotency_key = String(body.idempotency_key || '').trim() || `${domain}:${bucket}`;\n\n  out.push({\n    json: {\n      authorized,\n      valid_domain,\n      domain,\n      idempotency_key,\n      received_at: new Date().toISOString(),\n    },\n  });\n}\n\nreturn out;"
+        "jsCode": "// Auth is already done — the webhook node rejected anything without the right\n// token before this workflow started. All that is left is to normalise the\n// domain and derive the idempotency key.\n//\n// Idempotency key: client-supplied, else derived as `domain:YYYY-MM-DD`.\n// A readable composite beats a hash here — same collapsing behaviour for\n// accidental duplicate submissions inside the day bucket, but a reviewer can\n// read the key straight out of the table.\n\nconst hook = $('POST /lead').first().json;\nconst body = hook.body || {};\n\n// Same normalisation as QualifyRequest._normalize_domain in the API, so the\n// idempotency key is derived from the identical string the API scores.\nlet domain = String(body.domain || '').trim().toLowerCase();\ndomain = domain.replace(/^https?:\\/\\//, '').split('/')[0];\nconst valid_domain = domain.length >= 3 && domain.includes('.');\n\nconst bucket = new Date().toISOString().slice(0, 10);\nconst idempotency_key = String(body.idempotency_key || '').trim() || `${domain}:${bucket}`;\n\nreturn [{\n  json: {\n    valid_domain,\n    domain,\n    idempotency_key,\n    received_at: new Date().toISOString(),\n  },\n}];"
       },
-      "notes": "Auth gate + domain normalisation + idempotency key derivation (§4.7, §4.1)."
-    },
-    {
-      "id": "if-authorized",
-      "name": "Authorized & valid?",
-      "type": "n8n-nodes-base.if",
-      "typeVersion": 2.2,
-      "position": [
-        -20,
-        300
-      ],
-      "parameters": {
-        "conditions": {
-          "options": {
-            "caseSensitive": true,
-            "leftValue": "",
-            "typeValidation": "loose",
-            "version": 2
-          },
-          "conditions": [
-            {
-              "id": "c-auth",
-              "leftValue": "={{ $json.authorized }}",
-              "operator": {
-                "type": "boolean",
-                "operation": "true",
-                "singleValue": true
-              },
-              "rightValue": ""
-            },
-            {
-              "id": "c-domain",
-              "leftValue": "={{ $json.valid_domain }}",
-              "operator": {
-                "type": "boolean",
-                "operation": "true",
-                "singleValue": true
-              },
-              "rightValue": ""
-            }
-          ],
-          "combinator": "and"
-        },
-        "options": {}
-      },
-      "notes": "Rejects before touching Postgres or the API — no DB write, no LLM spend."
-    },
-    {
-      "id": "resp-reject",
-      "name": "Reject 401 / 400",
-      "type": "n8n-nodes-base.respondToWebhook",
-      "typeVersion": 1.5,
-      "position": [
-        200,
-        480
-      ],
-      "parameters": {
-        "respondWith": "json",
-        "responseBody": "={{ JSON.stringify({ error: $json.authorized ? 'invalid_domain' : 'unauthorized', detail: $json.authorized ? 'body.domain is missing or not a domain' : 'missing or wrong X-Auth-Token header' }) }}",
-        "options": {
-          "responseCode": "={{ $json.authorized ? 400 : 401 }}"
-        }
-      },
-      "notes": "401 for a bad token, 400 for a malformed domain."
+      "notes": "Domain normalisation + idempotency key derivation (§4.1)."
     },
     {
       "id": "pg-acquire",
       "name": "Acquire Idempotency Key",
       "type": "n8n-nodes-base.postgres",
-      "typeVersion": 2.7,
+      "typeVersion": 2.6,
       "position": [
         200,
         220
@@ -154,7 +106,7 @@
       "id": "pg-read-existing",
       "name": "Read Existing Key",
       "type": "n8n-nodes-base.postgres",
-      "typeVersion": 2.7,
+      "typeVersion": 2.6,
       "position": [
         420,
         560
@@ -260,14 +212,10 @@
       ],
       "parameters": {
         "method": "POST",
-        "url": "={{ ($env.LQ_API_URL || 'http://api:8000') }}/qualify",
+        "url": "={{ $('Config').first().json.api_url }}/qualify",
         "sendHeaders": true,
         "headerParameters": {
           "parameters": [
-            {
-              "name": "x-auth-token",
-              "value": "={{ $env.LQ_WEBHOOK_AUTH_TOKEN || '' }}"
-            },
             {
               "name": "x-trace-id",
               "value": "={{ $('Validate & Derive Key').first().json.idempotency_key }}"
@@ -285,10 +233,12 @@
               "neverError": true
             }
           }
-        }
+        },
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth"
       },
       "onError": "continueErrorOutput",
-      "notes": "§4.8 timeout arithmetic: enrichment 8s + up to 3 LLM attempts x 20s = 68s worst case, so the node timeout is set explicitly to 75s rather than left at the default. neverError + fullResponse hand every status code to the evaluator; the error output catches real transport failures. x-trace-id = the idempotency key, which is what correlates n8n executions with the API's structured_logs rows (§4.5)."
+      "notes": "§4.8 timeout arithmetic: enrichment 8s + up to 3 LLM attempts x 20s = 68s worst case, so the node timeout is set explicitly to 75s rather than left at the default. neverError + fullResponse hand every status code to the evaluator; the error output catches real transport failures.\n\nThe same Header Auth credential guards the webhook and authenticates this outbound call, so one rotation covers both hops and the token is never in the exported JSON.\n\nx-trace-id = the idempotency key, which is what correlates n8n executions with the API's structured_logs rows (§4.5)."
     },
     {
       "id": "code-evaluate",
@@ -374,7 +324,7 @@
                 "type": "number",
                 "operation": "lt"
               },
-              "rightValue": "={{ Number($env.LQ_N8N_MAX_ATTEMPTS || 3) }}"
+              "rightValue": "={{ $('Config').first().json.max_attempts }}"
             }
           ],
           "combinator": "and"
@@ -404,7 +354,7 @@
       "id": "pg-complete",
       "name": "Mark Completed",
       "type": "n8n-nodes-base.postgres",
-      "typeVersion": 2.7,
+      "typeVersion": 2.6,
       "position": [
         1560,
         40
@@ -507,7 +457,7 @@
           "conditions": [
             {
               "id": "c-hot-url",
-              "leftValue": "={{ $env.LQ_HOT_PATH_WEBHOOK_URL || '' }}",
+              "leftValue": "={{ $('Config').first().json.hot_path_webhook_url }}",
               "operator": {
                 "type": "string",
                 "operation": "notEmpty",
@@ -533,7 +483,7 @@
       ],
       "parameters": {
         "method": "POST",
-        "url": "={{ $env.LQ_HOT_PATH_WEBHOOK_URL }}",
+        "url": "={{ $('Config').first().json.hot_path_webhook_url }}",
         "sendBody": true,
         "specifyBody": "json",
         "jsonBody": "={{ JSON.stringify({ text: 'Hot lead: ' + $('Evaluate Attempt').first().json.domain + ' (score ' + $('Evaluate Attempt').first().json.body.score.score + ')', domain: $('Evaluate Attempt').first().json.domain, score: $('Evaluate Attempt').first().json.body.score.score, draft_message: $('Evaluate Attempt').first().json.body.score.draft_message }) }}",
@@ -616,7 +566,7 @@
       "id": "pg-deadletter",
       "name": "Dead Letter & Mark Failed",
       "type": "n8n-nodes-base.postgres",
-      "typeVersion": 2.7,
+      "typeVersion": 2.6,
       "position": [
         1780,
         420
@@ -647,6 +597,59 @@
         }
       },
       "notes": "Passes the API's typed status through (422 / 502 / 503) instead of flattening everything to 500, and hands back the dead-letter id so the failure is immediately greppable in Postgres."
+    },
+    {
+      "id": "if-valid-domain",
+      "name": "Valid domain?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        -20,
+        300
+      ],
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "c-domain",
+              "leftValue": "={{ $json.valid_domain }}",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              },
+              "rightValue": ""
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "notes": "Rejects before touching Postgres or the API — no DB write, no LLM spend."
+    },
+    {
+      "id": "resp-reject",
+      "name": "Reject 400 Invalid Domain",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.5,
+      "position": [
+        200,
+        480
+      ],
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ JSON.stringify({ error: 'invalid_domain', detail: 'body.domain is missing or not a domain' }) }}",
+        "options": {
+          "responseCode": "={{ 400 }}"
+        }
+      },
+      "notes": "A wrong token never reaches here — the webhook node answers that itself."
     }
   ],
   "connections": {
@@ -654,7 +657,7 @@
       "main": [
         [
           {
-            "node": "Validate & Derive Key",
+            "node": "Config",
             "type": "main",
             "index": 0
           }
@@ -665,25 +668,7 @@
       "main": [
         [
           {
-            "node": "Authorized & valid?",
-            "type": "main",
-            "index": 0
-          }
-        ]
-      ]
-    },
-    "Authorized & valid?": {
-      "main": [
-        [
-          {
-            "node": "Acquire Idempotency Key",
-            "type": "main",
-            "index": 0
-          }
-        ],
-        [
-          {
-            "node": "Reject 401 / 400",
+            "node": "Valid domain?",
             "type": "main",
             "index": 0
           }
@@ -938,6 +923,35 @@
         [
           {
             "node": "Respond Typed Error",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Config": {
+      "main": [
+        [
+          {
+            "node": "Validate & Derive Key",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Valid domain?": {
+      "main": [
+        [
+          {
+            "node": "Acquire Idempotency Key",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Reject 400 Invalid Domain",
             "type": "main",
             "index": 0
           }

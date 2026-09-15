@@ -29,22 +29,25 @@ async def test_inmemory_log_stores_events():
     assert repo.logs[1]["detail"]["score"] == 80
 
 
-async def _postgres_reachable() -> bool:
+async def _postgres_unavailable_reason() -> str | None:
+    """None when usable, else why — so a skip never misreports its own cause."""
     try:
-        import psycopg
-    except ImportError:
-        return False
+        import psycopg  # noqa: F401
+        import psycopg_pool  # noqa: F401  — PostgresRepository needs the pool too
+    except ImportError as exc:
+        return f"{exc.name} not installed (pip install -e '.[api]')"
     try:
-        conn = await psycopg.AsyncConnection.connect(settings.database_url, connect_timeout=2)
+        conn = await psycopg.AsyncConnection.connect(settings.database_url, connect_timeout=5)
         await conn.close()
-        return True
-    except Exception:
-        return False
+        return None
+    except Exception as exc:
+        return f"{type(exc).__name__}: {exc}"
 
 
 async def test_postgres_roundtrip_if_available():
-    if not await _postgres_reachable():
-        pytest.skip("no Postgres reachable (run inside the compose stack to exercise this)")
+    reason = await _postgres_unavailable_reason()
+    if reason is not None:
+        pytest.skip(f"Postgres not usable here — {reason}")
 
     from lead_qualifier.persistence import PostgresRepository
 

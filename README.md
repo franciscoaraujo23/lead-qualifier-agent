@@ -70,34 +70,51 @@ they are imported rather than baked into the image. The JSON is mounted at
 `/workflows` inside the container:
 
 ```bash
-# 1. Create one Postgres credential in the n8n UI (localhost:5678), named
-#    "Lead Qualifier Postgres", pointing at host `postgres`, db `lead_qualifier`,
-#    user/password `lq`/`lq`.
-
-# 2. Import both workflows.
+# 1. Import both workflows.
 docker compose exec n8n n8n import:workflow --separate --input=/workflows
-
-# 3. In the UI: select that credential on the four Postgres nodes, set
-#    "Lead Qualifier - Error Handler" as the error workflow on the main
-#    workflow's settings, and activate the main workflow.
 ```
+
+Then, in the UI at `localhost:5678`, create two credentials and attach them:
+
+| Credential | Type | Attach to |
+|---|---|---|
+| `Lead Qualifier Postgres` | Postgres — host `postgres`, db `lead_qualifier`, user/password `lq`/`lq` | the five Postgres nodes (four in the main workflow, one in the error handler) |
+| `Lead Qualifier Webhook Token` | Header Auth — name `X-Auth-Token`, value anything you choose | the `POST /lead` webhook node and the `Call /qualify` node |
+
+Finally, set "Lead Qualifier - Error Handler" as the error workflow in the main
+workflow's settings, and activate it.
+
+The workflow deliberately reads **no environment variables** — its tunables live
+in a `Config` node at the head of the canvas, and its two secrets are the
+credentials above. [architecture.md §9.6](architecture.md) explains why.
 
 Then drive it through the orchestration layer rather than the API directly:
 
 ```bash
-curl -X POST localhost:5678/webhook/lead   -H 'content-type: application/json'   -H 'x-auth-token: <LQ_WEBHOOK_AUTH_TOKEN, if set>'   -d '{"domain": "stripe.com"}'
+curl -X POST localhost:5678/webhook/lead   -H 'content-type: application/json'   -H 'x-auth-token: <the value you set in the Header Auth credential>'   -d '{"domain": "stripe.com"}'
 ```
 
 ### What each exit path returns
 
-| Situation | Status | Body |
-|---|---|---|
-| Qualified | `200` | the API's validated `QualifyResponse` |
-| Same key replayed after success | `200` | the **stored** result — routing is skipped, so no duplicate hot-path side effect |
-| Same key while the first run is working | `409` | `duplicate_in_flight` |
-| Bad or missing `X-Auth-Token` | `401` | `unauthorized` (before any DB write or LLM spend) |
-| Missing/malformed domain | `400` | `invalid_domain` |
-| API returned a typed error, or retries exhausted | the API's own status (`422`/`502`/`503`) | failure `stage`, `attempts`, and the `dead_letter_id` to look up |
+| Situation | Status | Body | Verified |
+|---|---|---|---|
+| Bad or missing `X-Auth-Token` | `403` | rejected by the webhook node itself, before the workflow starts — no execution record, no DB write, no spend | ✅ live |
+| Missing/malformed domain | `400` | `invalid_domain` | ✅ live |
+| Same key while the first run is working | `409` | `duplicate_in_flight` | ✅ live |
+| API unreachable or typed error, retries exhausted | the API's own status (`422`/`502`/`503`) | failure `stage`, `attempts`, and the `dead_letter_id` to look up | ✅ live |
+| Qualified | `200` | the API's validated `QualifyResponse` | ⏳ needs a reachable API |
+| Same key replayed after success | `200` | the **stored** result — routing is skipped, so no duplicate hot-path side effect | ⏳ needs a reachable API |
+
+The four verified rows were exercised against a live n8n instance backed by a
+real Postgres. The concurrency one is the interesting one: a second submission
+arriving 4s into a 25s run was answered `409` in 0.6s, having started no second
+pipeline. The two pending rows need `/qualify` running somewhere n8n can reach.
+
+The SQL behind all of this has its own tests —
+[`tests/test_idempotency_sql.py`](tests/test_idempotency_sql.py) reads the
+statements **out of the workflow JSON** so they cannot drift from what the nodes
+run, and checks the race directly: two simultaneous callers, exactly one winner,
+and the loser demonstrably blocked on the row lock rather than slipping past it.
 
 ### Seeing the machinery
 
@@ -112,10 +129,10 @@ SELECT failure_stage, attempt_count, last_error FROM dead_letters ORDER BY creat
 SELECT model, sum(cost_usd) AS spend, count(*) AS leads FROM token_usage GROUP BY model;
 ```
 
-Three implementation choices in that workflow are worth reading the rationale
-for — the hand-built retry loop, the readable idempotency key, and routing on
-`tier` rather than on a number. They are written up in
-[architecture.md §9](architecture.md).
+Seven implementation choices in that workflow are worth reading the rationale
+for — the hand-built retry loop, the readable idempotency key, routing on `tier`
+rather than on a number, and the two things only running it on a real n8n
+revealed. They are written up in [architecture.md §9](architecture.md).
 
 ## Configuration
 

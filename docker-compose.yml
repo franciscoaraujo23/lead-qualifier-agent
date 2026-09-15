@@ -41,15 +41,10 @@ services:
     environment:
       N8N_SECURE_COOKIE: "false"
       GENERIC_TIMEZONE: Europe/Lisbon
-      # The workflow's Code nodes read LQ_* config from the environment (auth
-      # token, hot-path webhook, retry bound) rather than hardcoding it in the
-      # canvas, so env access has to stay enabled here.
-      N8N_BLOCK_ENV_ACCESS_IN_NODE: "false"
-      # Service-to-service URL. Host-side callers use localhost:8000 instead.
-      LQ_API_URL: http://api:8000
-      LQ_WEBHOOK_AUTH_TOKEN: ${LQ_WEBHOOK_AUTH_TOKEN:-}
-      LQ_HOT_PATH_WEBHOOK_URL: ${LQ_HOT_PATH_WEBHOOK_URL:-}
-      LQ_N8N_MAX_ATTEMPTS: ${LQ_N8N_MAX_ATTEMPTS:-3}
+      # Nothing LQ_* is passed in on purpose. n8n task runners sandbox Code nodes
+      # and deny env access, so a workflow that reads $env only runs on a host
+      # configured to allow it. The workflow carries its own Config node instead,
+      # and its two secrets are credentials. See architecture.md §9.6.
     ports:
       - "5678:5678"
     volumes:
