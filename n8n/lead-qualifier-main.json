@@ -112,13 +112,7 @@
           "queryReplacement": "={{ [$json.idempotency_key, $json.domain] }}"
         }
       },
-      "credentials": {
-        "postgres": {
-          "id": "REPLACE_WITH_POSTGRES_CREDENTIAL_ID",
-          "name": "Lead Qualifier Postgres"
-        }
-      },
-      "notes": "§4.1 — the single atomic statement. alwaysOutputData is ON so the zero-row 'someone else holds this key' case still produces an item to branch on.",
+      "notes": "§4.1 — the single atomic statement. alwaysOutputData is ON so the zero-row 'someone else holds this key' case still produces an item to branch on.\n\nSelect the 'Lead Qualifier Postgres' credential on this node after import.",
       "alwaysOutputData": true
     },
     {
@@ -172,13 +166,7 @@
           "queryReplacement": "={{ [$('Validate & Derive Key').first().json.idempotency_key] }}"
         }
       },
-      "credentials": {
-        "postgres": {
-          "id": "REPLACE_WITH_POSTGRES_CREDENTIAL_ID",
-          "name": "Lead Qualifier Postgres"
-        }
-      },
-      "notes": "Race-free: the conflicting row is guaranteed to exist now that the upsert returned."
+      "notes": "Race-free: the conflicting row is guaranteed to exist now that the upsert returned.\n\nSelect the 'Lead Qualifier Postgres' credential on this node after import."
     },
     {
       "id": "switch-existing",
@@ -428,13 +416,7 @@
           "queryReplacement": "={{ [$json.idempotency_key, JSON.stringify($json.body)] }}"
         }
       },
-      "credentials": {
-        "postgres": {
-          "id": "REPLACE_WITH_POSTGRES_CREDENTIAL_ID",
-          "name": "Lead Qualifier Postgres"
-        }
-      },
-      "notes": "Stores the result so a replay of this key short-circuits to the cached branch."
+      "notes": "Stores the result so a replay of this key short-circuits to the cached branch.\n\nSelect the 'Lead Qualifier Postgres' credential on this node after import."
     },
     {
       "id": "switch-route",
@@ -646,13 +628,7 @@
           "queryReplacement": "={{ [$json.domain, $json.idempotency_key, $json.failure_stage, $json.last_error, $json.attempt_count, $json.payload_snapshot] }}"
         }
       },
-      "credentials": {
-        "postgres": {
-          "id": "REPLACE_WITH_POSTGRES_CREDENTIAL_ID",
-          "name": "Lead Qualifier Postgres"
-        }
-      },
-      "notes": "One statement: a dead letter can never exist beside a key still reading 'in_progress'."
+      "notes": "One statement: a dead letter can never exist beside a key still reading 'in_progress'.\n\nSelect the 'Lead Qualifier Postgres' credential on this node after import."
     },
     {
       "id": "resp-error",
@@ -974,7 +950,6 @@
     "timezone": "Europe/Lisbon",
     "saveDataErrorExecution": "all",
     "saveDataSuccessExecution": "all",
-    "saveExecutionProgress": true,
-    "errorWorkflow": "REPLACE_WITH_ERROR_WORKFLOW_ID"
+    "saveExecutionProgress": true
   }
 }

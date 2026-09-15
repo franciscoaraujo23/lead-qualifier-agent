@@ -43,13 +43,7 @@
           "queryReplacement": "={{ [$json.domain, $json.idempotency_key, $json.failure_stage, $json.last_error, $json.attempt_count, $json.payload_snapshot] }}"
         }
       },
-      "credentials": {
-        "postgres": {
-          "id": "REPLACE_WITH_POSTGRES_CREDENTIAL_ID",
-          "name": "Lead Qualifier Postgres"
-        }
-      },
-      "notes": "SELECT * FROM dead_letters WHERE failure_stage = 'unknown' shows these."
+      "notes": "SELECT * FROM dead_letters WHERE failure_stage = 'unknown' shows these.\n\nSelect the 'Lead Qualifier Postgres' credential on this node after import."
     }
   ],
   "connections": {
