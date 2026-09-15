@@ -1,6 +1,7 @@
 # Self-contained stack (architecture.md §5d). `docker compose up` brings up
 # Postgres (schema auto-created from migrations/), the FastAPI service, and n8n.
-# n8n's workflow (Phase 3B) is imported once the MCP tooling is reconnected.
+# The Phase 3B workflows live in ./n8n and are mounted into the n8n container,
+# so importing them is one command (see README).
 
 services:
   postgres:
@@ -40,12 +41,26 @@ services:
     environment:
       N8N_SECURE_COOKIE: "false"
       GENERIC_TIMEZONE: Europe/Lisbon
+      # The workflow's Code nodes read LQ_* config from the environment (auth
+      # token, hot-path webhook, retry bound) rather than hardcoding it in the
+      # canvas, so env access has to stay enabled here.
+      N8N_BLOCK_ENV_ACCESS_IN_NODE: "false"
+      # Service-to-service URL. Host-side callers use localhost:8000 instead.
+      LQ_API_URL: http://api:8000
+      LQ_WEBHOOK_AUTH_TOKEN: ${LQ_WEBHOOK_AUTH_TOKEN:-}
+      LQ_HOT_PATH_WEBHOOK_URL: ${LQ_HOT_PATH_WEBHOOK_URL:-}
+      LQ_N8N_MAX_ATTEMPTS: ${LQ_N8N_MAX_ATTEMPTS:-3}
     ports:
       - "5678:5678"
     volumes:
       - n8ndata:/home/node/.n8n
+      # Workflow JSON mounted read-only for `n8n import:workflow`.
+      - ./n8n:/workflows:ro
     depends_on:
-      - api
+      api:
+        condition: service_started
+      postgres:
+        condition: service_healthy
 
 volumes:
   pgdata:

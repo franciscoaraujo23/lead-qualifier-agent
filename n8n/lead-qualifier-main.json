@@ -1,0 +1,980 @@
+{
+  "name": "Lead Qualifier - Main",
+  "nodes": [
+    {
+      "id": "webhook-lead",
+      "name": "POST /lead",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2.1,
+      "position": [
+        -460,
+        300
+      ],
+      "webhookId": "b6f1a2c4-3d7e-4a91-8c55-0e2f7a9b1d34",
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "lead",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "notes": "Entry point. {\"domain\": \"acme.com\", \"idempotency_key\": \"<optional>\"} with an X-Auth-Token header. Responds via Respond-to-Webhook nodes so every exit path returns an explicit, typed status."
+    },
+    {
+      "id": "code-validate",
+      "name": "Validate & Derive Key",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -240,
+        300
+      ],
+      "parameters": {
+        "jsCode": "// Gate + normalise before any billable work happens (§4.7).\n//\n// Auth: shared secret compared against LQ_WEBHOOK_AUTH_TOKEN. If that env var\n// is unset the webhook is open, which mirrors the FastAPI service's behaviour\n// so `docker compose up` works with no keys at all.\n//\n// Idempotency key: client-supplied, else derived as `domain:YYYY-MM-DD`.\n// A readable composite beats a hash here — same collapsing behaviour for\n// accidental duplicate submissions inside the day bucket, but a reviewer can\n// read the key straight out of the table.\n\nconst expected = ($env.LQ_WEBHOOK_AUTH_TOKEN || '').trim();\nconst out = [];\n\nfor (const item of $input.all()) {\n  const headers = item.json.headers || {};\n  const body = item.json.body || {};\n\n  const supplied = String(headers['x-auth-token'] || '');\n  const authorized = expected === '' || supplied === expected;\n\n  // Same normalisation as QualifyRequest._normalize_domain in the API, so the\n  // idempotency key is derived from the identical string the API scores.\n  let domain = String(body.domain || '').trim().toLowerCase();\n  domain = domain.replace(/^https?:\\/\\//, '').split('/')[0];\n  const valid_domain = domain.length >= 3 && domain.includes('.');\n\n  const bucket = new Date().toISOString().slice(0, 10);\n  const idempotency_key = String(body.idempotency_key || '').trim() || `${domain}:${bucket}`;\n\n  out.push({\n    json: {\n      authorized,\n      valid_domain,\n      domain,\n      idempotency_key,\n      received_at: new Date().toISOString(),\n    },\n  });\n}\n\nreturn out;"
+      },
+      "notes": "Auth gate + domain normalisation + idempotency key derivation (§4.7, §4.1)."
+    },
+    {
+      "id": "if-authorized",
+      "name": "Authorized & valid?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        -20,
+        300
+      ],
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "c-auth",
+              "leftValue": "={{ $json.authorized }}",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              },
+              "rightValue": ""
+            },
+            {
+              "id": "c-domain",
+              "leftValue": "={{ $json.valid_domain }}",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              },
+              "rightValue": ""
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "notes": "Rejects before touching Postgres or the API — no DB write, no LLM spend."
+    },
+    {
+      "id": "resp-reject",
+      "name": "Reject 401 / 400",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.5,
+      "position": [
+        200,
+        480
+      ],
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ JSON.stringify({ error: $json.authorized ? 'invalid_domain' : 'unauthorized', detail: $json.authorized ? 'body.domain is missing or not a domain' : 'missing or wrong X-Auth-Token header' }) }}",
+        "options": {
+          "responseCode": "={{ $json.authorized ? 400 : 401 }}"
+        }
+      },
+      "notes": "401 for a bad token, 400 for a malformed domain."
+    },
+    {
+      "id": "pg-acquire",
+      "name": "Acquire Idempotency Key",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.7,
+      "position": [
+        200,
+        220
+      ],
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "-- §4.1 Idempotency acquisition: ONE atomic statement, never check-then-insert.\n-- Two concurrent submissions of the same key cannot both pass here.\n--   * fresh key            -> row inserted, xmax = 0     -> outcome 'acquired_new'\n--   * key exists, 'failed' -> reset to in_progress       -> outcome 'acquired_retry'\n--   * key exists, 'completed' or 'in_progress'\n--                          -> ON CONFLICT WHERE fails, ZERO rows returned.\n-- Zero rows is the signal that a concurrent caller owns the key; the next node\n-- reads its current status. That read is race-free because the row is\n-- guaranteed to exist once this statement has returned.\nINSERT INTO idempotency_keys (key, domain, status)\nVALUES ($1, $2, 'in_progress')\nON CONFLICT (key) DO UPDATE\n   SET status     = 'in_progress',\n       updated_at = now()\n WHERE idempotency_keys.status = 'failed'\nRETURNING key,\n          CASE WHEN xmax = 0 THEN 'acquired_new' ELSE 'acquired_retry' END AS outcome;",
+        "options": {
+          "queryReplacement": "={{ [$json.idempotency_key, $json.domain] }}"
+        }
+      },
+      "credentials": {
+        "postgres": {
+          "id": "REPLACE_WITH_POSTGRES_CREDENTIAL_ID",
+          "name": "Lead Qualifier Postgres"
+        }
+      },
+      "notes": "§4.1 — the single atomic statement. alwaysOutputData is ON so the zero-row 'someone else holds this key' case still produces an item to branch on.",
+      "alwaysOutputData": true
+    },
+    {
+      "id": "if-acquired",
+      "name": "Key acquired?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        420,
+        220
+      ],
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "c-outcome",
+              "leftValue": "={{ $json.outcome }}",
+              "operator": {
+                "type": "string",
+                "operation": "exists",
+                "singleValue": true
+              },
+              "rightValue": ""
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "notes": "A returned row means we own the work. No row means a concurrent caller does."
+    },
+    {
+      "id": "pg-read-existing",
+      "name": "Read Existing Key",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.7,
+      "position": [
+        420,
+        560
+      ],
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "-- We lost the race for this key. Read who holds it and in what state.\nSELECT key, domain, status, result\n  FROM idempotency_keys\n WHERE key = $1;",
+        "options": {
+          "queryReplacement": "={{ [$('Validate & Derive Key').first().json.idempotency_key] }}"
+        }
+      },
+      "credentials": {
+        "postgres": {
+          "id": "REPLACE_WITH_POSTGRES_CREDENTIAL_ID",
+          "name": "Lead Qualifier Postgres"
+        }
+      },
+      "notes": "Race-free: the conflicting row is guaranteed to exist now that the upsert returned."
+    },
+    {
+      "id": "switch-existing",
+      "name": "Cached or in flight?",
+      "type": "n8n-nodes-base.switch",
+      "typeVersion": 3.4,
+      "position": [
+        640,
+        560
+      ],
+      "parameters": {
+        "rules": {
+          "values": [
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "loose",
+                  "version": 2
+                },
+                "conditions": [
+                  {
+                    "id": "c-completed",
+                    "leftValue": "={{ $json.status }}",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    },
+                    "rightValue": "completed"
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "completed"
+            }
+          ]
+        },
+        "options": {
+          "fallbackOutput": "extra",
+          "renameFallbackOutput": "in_progress"
+        }
+      },
+      "notes": "Terminal 'completed' returns the stored result. Anything else is still in flight."
+    },
+    {
+      "id": "resp-cached",
+      "name": "Respond 200 Cached",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.5,
+      "position": [
+        880,
+        480
+      ],
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ JSON.stringify($json.result) }}",
+        "options": {
+          "responseCode": "={{ 200 }}"
+        }
+      },
+      "notes": "§4.1 — returns the stored result and STOPS. This branch deliberately does not reach the routing Switch: re-submitting a lead must never re-fire the hot path."
+    },
+    {
+      "id": "resp-409",
+      "name": "Respond 409 In Flight",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.5,
+      "position": [
+        880,
+        660
+      ],
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ JSON.stringify({ error: 'duplicate_in_flight', idempotency_key: $json.key, detail: 'this key is already being processed' }) }}",
+        "options": {
+          "responseCode": "={{ 409 }}"
+        }
+      },
+      "notes": "Duplicate while the first run is still working."
+    },
+    {
+      "id": "http-qualify",
+      "name": "Call /qualify",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        860,
+        160
+      ],
+      "parameters": {
+        "method": "POST",
+        "url": "={{ ($env.LQ_API_URL || 'http://api:8000') }}/qualify",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "x-auth-token",
+              "value": "={{ $env.LQ_WEBHOOK_AUTH_TOKEN || '' }}"
+            },
+            {
+              "name": "x-trace-id",
+              "value": "={{ $('Validate & Derive Key').first().json.idempotency_key }}"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ domain: $('Validate & Derive Key').first().json.domain }) }}",
+        "options": {
+          "timeout": 75000,
+          "response": {
+            "response": {
+              "fullResponse": true,
+              "neverError": true
+            }
+          }
+        }
+      },
+      "onError": "continueErrorOutput",
+      "notes": "§4.8 timeout arithmetic: enrichment 8s + up to 3 LLM attempts x 20s = 68s worst case, so the node timeout is set explicitly to 75s rather than left at the default. neverError + fullResponse hand every status code to the evaluator; the error output catches real transport failures. x-trace-id = the idempotency key, which is what correlates n8n executions with the API's structured_logs rows (§4.5)."
+    },
+    {
+      "id": "code-evaluate",
+      "name": "Evaluate Attempt",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1100,
+        160
+      ],
+      "parameters": {
+        "jsCode": "// Single place where a /qualify attempt is judged, fed by BOTH outputs of the\n// HTTP node: the normal output (any status code, because neverError is on) and\n// the error output (a genuine transport failure — DNS, refused, timeout).\n//\n// Retryable == transport-shaped only (status 0 or 5xx, minus 503 cost-ceiling).\n// A typed 422 from the API is deterministic: re-sending the identical request\n// would just burn another full enrichment + LLM pipeline for the same answer.\n// This is exactly why the retry loop is hand-built instead of using the HTTP\n// node's own retryOnFail, which cannot distinguish the two (§4.2).\n\nconst raw = $input.first().json;\nconst attempt = $runIndex + 1;\n\nlet statusCode = Number(raw.statusCode ?? 0);\nlet body = raw.body ?? null;\nlet transport_error = null;\n\nif (!raw.statusCode) {\n  // Error output: dig the message out of whatever shape n8n handed us.\n  const e = raw.error ?? raw;\n  statusCode = Number(e.httpCode ?? e.statusCode ?? 0) || 0;\n  transport_error = String(e.message ?? e.description ?? JSON.stringify(e));\n  body = e.body ?? null;\n}\n\nif (typeof body === 'string') {\n  try { body = JSON.parse(body); } catch (err) { body = { detail: body }; }\n}\nbody = body ?? {};\n\nconst ok = statusCode === 200;\n\n// 503 is the daily cost ceiling (§4.7) — a budget decision, not a hiccup.\n// Retrying it four seconds later cannot help and would mask the signal.\nconst retryable = !ok && (statusCode === 0 || (statusCode >= 500 && statusCode !== 503));\n\nconst last_error = ok\n  ? null\n  : (transport_error\n      ?? body.detail\n      ?? `${body.error ?? 'http_error'}: ${JSON.stringify(body).slice(0, 500)}`);\n\nreturn [{\n  json: {\n    ok,\n    retryable,\n    attempt,\n    status_code: statusCode,\n    last_error,\n    body,\n    domain: $('Validate & Derive Key').first().json.domain,\n    idempotency_key: $('Validate & Derive Key').first().json.idempotency_key,\n  },\n}];"
+      },
+      "notes": "Judges one attempt and decides whether it is worth repeating (§4.2)."
+    },
+    {
+      "id": "if-success",
+      "name": "Qualified?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        1320,
+        160
+      ],
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "c-ok",
+              "leftValue": "={{ $json.ok }}",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              },
+              "rightValue": ""
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "notes": "200 with a valid payload, or not."
+    },
+    {
+      "id": "if-retry",
+      "name": "Retry transport?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        1320,
+        420
+      ],
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "c-retryable",
+              "leftValue": "={{ $json.retryable }}",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              },
+              "rightValue": ""
+            },
+            {
+              "id": "c-attempts",
+              "leftValue": "={{ $json.attempt }}",
+              "operator": {
+                "type": "number",
+                "operation": "lt"
+              },
+              "rightValue": "={{ Number($env.LQ_N8N_MAX_ATTEMPTS || 3) }}"
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "notes": "§4.2 transport layer: 3 attempts total, 5xx/network only. Deliberately separate from the API's schema-repair retry, which changes the prompt instead of re-sending an identical request."
+    },
+    {
+      "id": "wait-backoff",
+      "name": "Exponential backoff",
+      "type": "n8n-nodes-base.wait",
+      "typeVersion": 1.1,
+      "position": [
+        1100,
+        420
+      ],
+      "webhookId": "c8d2b5e1-9a47-4f63-b0d8-51e3c7a4f902",
+      "parameters": {
+        "resume": "timeInterval",
+        "amount": "={{ Math.pow(2, $json.attempt) }}",
+        "unit": "seconds"
+      },
+      "notes": "2s, then 4s. Feeds straight back into Call /qualify; $runIndex is what carries the attempt count around the loop."
+    },
+    {
+      "id": "pg-complete",
+      "name": "Mark Completed",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.7,
+      "position": [
+        1560,
+        40
+      ],
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "-- Terminal state. A 'completed' key is never re-run and never re-routed,\n-- so a duplicate submission cannot re-fire the hot-path side effect (§4.1).\nUPDATE idempotency_keys\n   SET status     = 'completed',\n       result     = $2::jsonb,\n       updated_at = now()\n WHERE key = $1\nRETURNING key, status, updated_at;",
+        "options": {
+          "queryReplacement": "={{ [$json.idempotency_key, JSON.stringify($json.body)] }}"
+        }
+      },
+      "credentials": {
+        "postgres": {
+          "id": "REPLACE_WITH_POSTGRES_CREDENTIAL_ID",
+          "name": "Lead Qualifier Postgres"
+        }
+      },
+      "notes": "Stores the result so a replay of this key short-circuits to the cached branch."
+    },
+    {
+      "id": "switch-route",
+      "name": "Route by score",
+      "type": "n8n-nodes-base.switch",
+      "typeVersion": 3.4,
+      "position": [
+        1780,
+        40
+      ],
+      "parameters": {
+        "rules": {
+          "values": [
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "loose",
+                  "version": 2
+                },
+                "conditions": [
+                  {
+                    "id": "c-hot",
+                    "leftValue": "={{ $('Evaluate Attempt').first().json.body.tier }}",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    },
+                    "rightValue": "hot"
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "hot"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "loose",
+                  "version": 2
+                },
+                "conditions": [
+                  {
+                    "id": "c-warm",
+                    "leftValue": "={{ $('Evaluate Attempt').first().json.body.tier }}",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    },
+                    "rightValue": "warm"
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "warm"
+            }
+          ]
+        },
+        "options": {
+          "fallbackOutput": "extra",
+          "renameFallbackOutput": "cold"
+        }
+      },
+      "notes": "Routes on `tier`, not on a number. The hot>=70 / warm 40-69 / cold<40 cutoffs live in exactly one place — Thresholds in config.py — so they are never duplicated into this node (§8). n8n still owns what each tier DOES; the API only owns where the lines are. Cold is the fallback output, so an unexpected tier degrades to the branch with no side effects."
+    },
+    {
+      "id": "if-hot-configured",
+      "name": "Hot: action configured?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        2000,
+        -160
+      ],
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "c-hot-url",
+              "leftValue": "={{ $env.LQ_HOT_PATH_WEBHOOK_URL || '' }}",
+              "operator": {
+                "type": "string",
+                "operation": "notEmpty",
+                "singleValue": true
+              },
+              "rightValue": ""
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "notes": "§8 — the real hot-path action activates only if LQ_HOT_PATH_WEBHOOK_URL is set. Nobody needs a Slack workspace to run the demo, and the extension point is real rather than hypothetical."
+    },
+    {
+      "id": "http-hot-notify",
+      "name": "Hot: notify",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        2220,
+        -260
+      ],
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.LQ_HOT_PATH_WEBHOOK_URL }}",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ text: 'Hot lead: ' + $('Evaluate Attempt').first().json.domain + ' (score ' + $('Evaluate Attempt').first().json.body.score.score + ')', domain: $('Evaluate Attempt').first().json.domain, score: $('Evaluate Attempt').first().json.body.score.score, draft_message: $('Evaluate Attempt').first().json.body.score.draft_message }) }}",
+        "options": {
+          "timeout": 10000
+        }
+      },
+      "onError": "continueRegularOutput",
+      "notes": "Same graceful-degradation rule as enrichment: a dead Slack hook must not sink an otherwise-qualified lead, so failure continues rather than throwing."
+    },
+    {
+      "id": "noop-hot",
+      "name": "Hot: no action configured",
+      "type": "n8n-nodes-base.noOp",
+      "typeVersion": 1,
+      "position": [
+        2220,
+        -60
+      ],
+      "parameters": {},
+      "notes": "Hot path with no webhook configured — the documented default."
+    },
+    {
+      "id": "noop-warm",
+      "name": "Warm: nurture",
+      "type": "n8n-nodes-base.noOp",
+      "typeVersion": 1,
+      "position": [
+        2000,
+        60
+      ],
+      "parameters": {},
+      "notes": "Warm band (40-69). Extension point for a nurture sequence."
+    },
+    {
+      "id": "noop-cold",
+      "name": "Cold: archive",
+      "type": "n8n-nodes-base.noOp",
+      "typeVersion": 1,
+      "position": [
+        2000,
+        240
+      ],
+      "parameters": {},
+      "notes": "Cold band (<40) and the fallback for any unexpected tier. No side effects."
+    },
+    {
+      "id": "resp-qualified",
+      "name": "Respond 200 Qualified",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.5,
+      "position": [
+        2500,
+        40
+      ],
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ JSON.stringify($('Evaluate Attempt').first().json.body) }}",
+        "options": {
+          "responseCode": "={{ 200 }}"
+        }
+      },
+      "notes": "Returns the API's own validated payload verbatim — n8n never reshapes the domain contract."
+    },
+    {
+      "id": "code-classify",
+      "name": "Classify Failure",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1560,
+        420
+      ],
+      "parameters": {
+        "jsCode": "// Retries are exhausted or the failure was never retryable. Turn it into a\n// dead-letter row whose failure_stage matches the CHECK constraint in\n// migrations/001_init.sql, so the DLQ stays queryable by stage (§4.4).\n\nconst r = $input.first().json;\nconst meta = $('Validate & Derive Key').first().json;\n\nconst ALLOWED = ['enrichment', 'llm', 'schema', 'network', 'cost_ceiling', 'unknown'];\n\n// The API names its own stage in the typed error body; that is authoritative.\n// Anything else is classified from the status code.\nlet failure_stage = r.body?.stage;\nif (!ALLOWED.includes(failure_stage)) {\n  if (r.status_code === 0 || r.status_code >= 500) failure_stage = 'network';\n  else failure_stage = 'unknown';\n}\n\n// Client-visible status: pass the API's typed status straight through so the\n// caller sees 422 vs 503 vs 502, not a flattened 500.\nconst response_status = r.status_code === 0 ? 502 : r.status_code;\n\nreturn [{\n  json: {\n    domain: meta.domain,\n    idempotency_key: meta.idempotency_key,\n    failure_stage,\n    last_error: String(r.last_error ?? 'unknown failure').slice(0, 4000),\n    attempt_count: r.attempt,\n    response_status,\n    payload_snapshot: JSON.stringify({\n      request: { domain: meta.domain, idempotency_key: meta.idempotency_key },\n      received_at: meta.received_at,\n      status_code: r.status_code,\n      response_body: r.body,\n      attempts: r.attempt,\n      execution_id: $execution.id,\n    }),\n  },\n}];"
+      },
+      "notes": "Maps the failure onto the dead_letters.failure_stage CHECK constraint (§4.4)."
+    },
+    {
+      "id": "pg-deadletter",
+      "name": "Dead Letter & Mark Failed",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.7,
+      "position": [
+        1780,
+        420
+      ],
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "-- §4.4 Dead-letter write and idempotency demotion in one statement, so we can\n-- never end up with a dead letter whose key still reads 'in_progress'.\n-- 'failed' is retryable: a later submission of the same key re-acquires it.\nWITH dl AS (\n  INSERT INTO dead_letters\n    (domain, idempotency_key, failure_stage, last_error, attempt_count, payload_snapshot)\n  VALUES ($1, $2, $3, $4, $5, $6::jsonb)\n  RETURNING id\n)\nUPDATE idempotency_keys\n   SET status     = 'failed',\n       updated_at = now()\n WHERE key = $2\nRETURNING key, status, (SELECT id FROM dl) AS dead_letter_id;",
+        "options": {
+          "queryReplacement": "={{ [$json.domain, $json.idempotency_key, $json.failure_stage, $json.last_error, $json.attempt_count, $json.payload_snapshot] }}"
+        }
+      },
+      "credentials": {
+        "postgres": {
+          "id": "REPLACE_WITH_POSTGRES_CREDENTIAL_ID",
+          "name": "Lead Qualifier Postgres"
+        }
+      },
+      "notes": "One statement: a dead letter can never exist beside a key still reading 'in_progress'."
+    },
+    {
+      "id": "resp-error",
+      "name": "Respond Typed Error",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.5,
+      "position": [
+        2000,
+        420
+      ],
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ JSON.stringify({ error: 'qualification_failed', stage: $('Classify Failure').first().json.failure_stage, detail: $('Classify Failure').first().json.last_error, attempts: $('Classify Failure').first().json.attempt_count, dead_letter_id: $json.dead_letter_id, idempotency_key: $('Classify Failure').first().json.idempotency_key }) }}",
+        "options": {
+          "responseCode": "={{ $('Classify Failure').first().json.response_status }}"
+        }
+      },
+      "notes": "Passes the API's typed status through (422 / 502 / 503) instead of flattening everything to 500, and hands back the dead-letter id so the failure is immediately greppable in Postgres."
+    }
+  ],
+  "connections": {
+    "POST /lead": {
+      "main": [
+        [
+          {
+            "node": "Validate & Derive Key",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Validate & Derive Key": {
+      "main": [
+        [
+          {
+            "node": "Authorized & valid?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Authorized & valid?": {
+      "main": [
+        [
+          {
+            "node": "Acquire Idempotency Key",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Reject 401 / 400",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Acquire Idempotency Key": {
+      "main": [
+        [
+          {
+            "node": "Key acquired?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Key acquired?": {
+      "main": [
+        [
+          {
+            "node": "Call /qualify",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Read Existing Key",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Read Existing Key": {
+      "main": [
+        [
+          {
+            "node": "Cached or in flight?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Cached or in flight?": {
+      "main": [
+        [
+          {
+            "node": "Respond 200 Cached",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Respond 409 In Flight",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Call /qualify": {
+      "main": [
+        [
+          {
+            "node": "Evaluate Attempt",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Evaluate Attempt",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Evaluate Attempt": {
+      "main": [
+        [
+          {
+            "node": "Qualified?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Qualified?": {
+      "main": [
+        [
+          {
+            "node": "Mark Completed",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Retry transport?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Retry transport?": {
+      "main": [
+        [
+          {
+            "node": "Exponential backoff",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Classify Failure",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Exponential backoff": {
+      "main": [
+        [
+          {
+            "node": "Call /qualify",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Mark Completed": {
+      "main": [
+        [
+          {
+            "node": "Route by score",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Route by score": {
+      "main": [
+        [
+          {
+            "node": "Hot: action configured?",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Warm: nurture",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Cold: archive",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Hot: action configured?": {
+      "main": [
+        [
+          {
+            "node": "Hot: notify",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Hot: no action configured",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Hot: notify": {
+      "main": [
+        [
+          {
+            "node": "Respond 200 Qualified",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Hot: no action configured": {
+      "main": [
+        [
+          {
+            "node": "Respond 200 Qualified",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Warm: nurture": {
+      "main": [
+        [
+          {
+            "node": "Respond 200 Qualified",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Cold: archive": {
+      "main": [
+        [
+          {
+            "node": "Respond 200 Qualified",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Classify Failure": {
+      "main": [
+        [
+          {
+            "node": "Dead Letter & Mark Failed",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Dead Letter & Mark Failed": {
+      "main": [
+        [
+          {
+            "node": "Respond Typed Error",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "timezone": "Europe/Lisbon",
+    "saveDataErrorExecution": "all",
+    "saveDataSuccessExecution": "all",
+    "saveExecutionProgress": true,
+    "errorWorkflow": "REPLACE_WITH_ERROR_WORKFLOW_ID"
+  }
+}

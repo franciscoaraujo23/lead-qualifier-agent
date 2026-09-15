@@ -179,6 +179,7 @@ This boundary is what makes the core reusable in the eval-harness piece and in t
 **Phase 3 — n8n orchestration**
 - Webhook, idempotency check/write, HTTP call to `/qualify`, transport retry/backoff, score-based Switch routing.
 - Error Workflow wired to dead-letter write.
+- *Built. See §9 for the five places the implementation reasoned its way past this document.*
 
 **Phase 4 — Observability polish**
 - Structured logs with `trace_id` correlation across both systems.
@@ -197,6 +198,89 @@ You couldn't review live, so I made the reasonable call on the three open items 
 - **Hot-path action**: **no-op stub by default**, with an *optional* real action (Slack/webhook) that activates only if `HOT_PATH_WEBHOOK_URL` is set — the same graceful-degradation pattern as enrichment. Keeps the public demo dependency-free (nobody needs a Slack workspace to run it) while showing the extension point is real, not hypothetical.
 
 If you want any of these changed, they're isolated to config and the Switch node — no architectural rework.
+
+## 9. Phase 3B build notes — where the implementation diverged, and why
+
+The workflow lives in `n8n/lead-qualifier-main.json` (26 nodes) and
+`n8n/lead-qualifier-error-handler.json`. Five decisions departed from the
+letter of this document while keeping its intent. Each is recorded here because
+the reasoning is the point of the piece.
+
+### 9.1 The transport retry is hand-built, not the HTTP node's `retryOnFail`
+
+§4.2 specifies exponential backoff "for network errors / 5xx". n8n's built-in
+`retryOnFail` cannot express that condition: it retries on *any* node error. A
+typed `422` from the schema-repair loop would therefore be re-sent twice more,
+burning two extra full enrichment + LLM pipelines to arrive at the identical
+deterministic answer — precisely the spend §4.6 and §4.7 exist to control.
+
+So the HTTP node is configured to never throw on a status code
+(`neverError` + `fullResponse`), and the retry is an explicit
+`Evaluate Attempt → Retry transport? → Exponential backoff → Call /qualify`
+loop. The attempt counter is `$runIndex`. This buys three things the built-in
+cannot: retry scoped to status 0 and 5xx only, `503` (the daily cost ceiling)
+deliberately excluded because a budget decision will not resolve itself in four
+seconds, and an honest `attempt_count` to write into the dead letter.
+
+### 9.2 The idempotency key is readable, not hashed
+
+§4.1 suggests `hash(domain + date-bucket)`. The implementation uses the plain
+composite `domain:YYYY-MM-DD`. It collapses accidental duplicate submissions
+inside the day bucket identically, but `SELECT * FROM idempotency_keys WHERE key
+= 'stripe.com:2026-09-15'` is a query a reviewer can type from memory, and the
+DLQ rows become self-describing. A hash bought opacity that nothing here needs.
+
+### 9.3 Acquisition uses `DO UPDATE ... WHERE`, not `DO NOTHING`
+
+§4.1's `ON CONFLICT DO NOTHING RETURNING status` cannot express the
+"`failed` is retryable" rule in the same statement, and its `RETURNING` yields
+nothing on conflict anyway — so it still needs a second query to learn the
+existing status.
+
+The implementation uses:
+
+```sql
+ON CONFLICT (key) DO UPDATE SET status = 'in_progress', updated_at = now()
+ WHERE idempotency_keys.status = 'failed'
+RETURNING key, CASE WHEN xmax = 0 THEN 'acquired_new' ELSE 'acquired_retry' END AS outcome;
+```
+
+One atomic statement now covers both winning paths — fresh insert and
+failed-key reset — and returns which one happened. Zero rows still means a
+concurrent caller owns the key, and the follow-up read is race-free precisely
+because the conflicting row is guaranteed to exist once this statement has
+returned. The race §4.1 closes is closed; the retryable-failure rule got
+folded into the same statement rather than bolted on after it.
+
+### 9.4 Dead-lettering happens in two places, deliberately
+
+§4.4 puts the dead-letter write in the Error Workflow. Taken literally, that
+loses two things: the Error Trigger receives the execution context but **not**
+the original webhook payload (so `payload_snapshot` and `domain` would be
+guesses), and a workflow that errors out cannot answer the HTTP caller — they
+get a generic 500 instead of the typed status the API worked to produce.
+
+So expected failures — a typed error from `/qualify`, or exhausted transport
+retries — are handled on the main workflow's own error branch, which has the
+full request context, writes the dead letter and demotes the idempotency key in
+one statement, and returns the API's real status code. The Error Workflow
+remains wired up as the safety net beneath that, for failures the main workflow
+could not handle at all (Postgres unreachable, an expression blowing up). The
+two never both fire for the same failure: if the error branch ran, the workflow
+succeeded.
+
+This is also why the Postgres nodes carry no `onError` override. They are meant
+to fail loudly into the safety net — a database that cannot record a dead
+letter must not silently pretend it did.
+
+### 9.5 The Switch routes on `tier`, not on the score
+
+§8 requires the hot/warm/cold cutoffs to live in one tunable place rather than
+being hardcoded in the Switch node. The API already computes `tier` from
+`Thresholds` in `config.py`, so the Switch matches on that string. The division
+of ownership is exact: the API owns *where the lines are*, n8n owns *what each
+tier does*. Cold is the Switch's fallback output, so an unexpected tier
+degrades to the branch with no side effects rather than dropping the lead.
 
 ---
 

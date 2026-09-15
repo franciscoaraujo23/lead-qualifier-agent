@@ -1,0 +1,83 @@
+{
+  "name": "Lead Qualifier - Error Handler",
+  "nodes": [
+    {
+      "id": "error-trigger",
+      "name": "On unhandled failure",
+      "type": "n8n-nodes-base.errorTrigger",
+      "typeVersion": 1,
+      "position": [
+        0,
+        300
+      ],
+      "parameters": {},
+      "notes": "Fires only for failures the main workflow did NOT handle itself. Expected failures (a typed error from /qualify, exhausted transport retries) are dead-lettered on the main workflow's own error branch with full context, which also lets the caller get a real HTTP response. This is the net underneath that: Postgres down, an expression blowing up, and so on."
+    },
+    {
+      "id": "code-safety",
+      "name": "Extract Failure Context",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        220,
+        300
+      ],
+      "parameters": {
+        "jsCode": "// Error Trigger payload: execution context, not the original webhook body.\n// Record what is actually available rather than inventing a domain.\n\nconst e = $input.first().json;\nconst err = e.execution?.error ?? {};\n\nreturn [{\n  json: {\n    domain: 'unknown',\n    idempotency_key: null,\n    failure_stage: 'unknown',\n    last_error: String(err.message ?? 'unhandled workflow failure').slice(0, 4000),\n    attempt_count: 1,\n    payload_snapshot: JSON.stringify({\n      source: 'error_workflow_safety_net',\n      workflow: e.workflow ?? null,\n      execution_id: e.execution?.id ?? null,\n      execution_url: e.execution?.url ?? null,\n      last_node_executed: e.execution?.lastNodeExecuted ?? null,\n      mode: e.execution?.mode ?? null,\n      error_name: err.name ?? null,\n      error_node: err.node?.name ?? null,\n    }),\n  },\n}];"
+      },
+      "notes": "Records what the Error Trigger actually exposes rather than inventing a domain."
+    },
+    {
+      "id": "pg-safety",
+      "name": "Write Dead Letter",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.7,
+      "position": [
+        440,
+        300
+      ],
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "-- Safety net only. The main workflow handles every *expected* failure on its\n-- own error branch with full context; this fires for unhandled node failures\n-- (e.g. Postgres itself unreachable), where the Error Trigger exposes the\n-- execution context but not the original webhook payload.\nINSERT INTO dead_letters\n  (domain, idempotency_key, failure_stage, last_error, attempt_count, payload_snapshot)\nVALUES ($1, $2, $3, $4, $5, $6::jsonb)\nRETURNING id, failure_stage, created_at;",
+        "options": {
+          "queryReplacement": "={{ [$json.domain, $json.idempotency_key, $json.failure_stage, $json.last_error, $json.attempt_count, $json.payload_snapshot] }}"
+        }
+      },
+      "credentials": {
+        "postgres": {
+          "id": "REPLACE_WITH_POSTGRES_CREDENTIAL_ID",
+          "name": "Lead Qualifier Postgres"
+        }
+      },
+      "notes": "SELECT * FROM dead_letters WHERE failure_stage = 'unknown' shows these."
+    }
+  ],
+  "connections": {
+    "On unhandled failure": {
+      "main": [
+        [
+          {
+            "node": "Extract Failure Context",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Extract Failure Context": {
+      "main": [
+        [
+          {
+            "node": "Write Dead Letter",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "timezone": "Europe/Lisbon"
+  }
+}
