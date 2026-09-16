@@ -181,9 +181,14 @@ This boundary is what makes the core reusable in the eval-harness piece and in t
 - Error Workflow wired to dead-letter write.
 - *Built. See §9 for the five places the implementation reasoned its way past this document.*
 
-**Phase 4 — Observability polish**
+**Phase 4 — Observability polish** *(done)*
 - Structured logs with `trace_id` correlation across both systems.
-- A minimal `/stats` view or query set for cost/latency/failure-rate, screenshot-able for the portfolio writeup.
+- A minimal `/stats` endpoint for cost/latency/failure-rate, screenshot-able for
+  the portfolio writeup. Built: it aggregates the already-persisted
+  `token_usage` and `structured_logs` (a read path, no new writes) into running
+  spend, a per-model breakdown, cost per delivered lead, schema-repair overhead
+  (`llm_calls` vs `leads`), cost-ceiling usage, and completed/failed/avg-latency.
+  Behind the same optional auth token as `/qualify`.
 
 **Phase 5 — Packaging for reproducibility**
 - `docker-compose.yml` bringing up all three services with sane defaults, `.env.example`, a README with a "clone and run in under 5 minutes" path and one example domain to try.

@@ -21,6 +21,9 @@ The design and the reasoning behind every decision live in
 - **Phase 3B (n8n orchestration)** — done: the workflow (webhook, atomic
   idempotency, transport retry with backoff, score routing, dead-letter) plus a
   safety-net error workflow, in [`n8n/`](n8n).
+- **Phase 4 (observability)** — done: structured logs correlated by `trace_id`,
+  and a `/stats` endpoint (running spend, cost per lead, per-model breakdown,
+  repair overhead, failure rate, latency).
 
 See the full build plan in [architecture.md §7](architecture.md).
 
@@ -47,6 +50,16 @@ Try it:
 ```bash
 curl -X POST localhost:8000/qualify -H 'content-type: application/json' \
   -d '{"domain": "stripe.com"}'
+```
+
+Then see the running economics and reliability:
+
+```bash
+curl localhost:8000/stats
+# { "total_cost_usd": ..., "cost_per_lead_usd": ..., "leads": ...,
+#   "llm_calls": ..., "by_model": [...], "ceiling_used_pct": ...,
+#   "requests_completed": ..., "requests_failed": ..., "failure_rate": ...,
+#   "avg_latency_ms": ... }
 ```
 
 ## Layout
