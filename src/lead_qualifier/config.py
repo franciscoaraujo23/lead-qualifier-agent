@@ -30,10 +30,12 @@ class Thresholds:
 # Per-model cost in USD per 1M tokens (input, output). Used by token accounting.
 # Extend when adding models; the provider-agnostic interface means the key is
 # just the model id the provider reports.
+# First-party API list prices, checked 2026-09-16. Re-check when prices change:
+# a stale row silently skews every cost-per-lead figure and the daily ceiling.
 COST_TABLE: dict[str, tuple[float, float]] = {
     "claude-haiku-4-5": (1.00, 5.00),
-    "claude-sonnet-5": (3.00, 15.00),
-    "claude-opus-5": (15.00, 75.00),
+    "claude-sonnet-5": (2.00, 10.00),
+    "claude-opus-5": (5.00, 25.00),
     "mock": (0.0, 0.0),
 }
 
