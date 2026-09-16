@@ -13,7 +13,38 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Protocol
 
 from .config import settings
-from .schemas import TokenUsage
+from .schemas import ModelSpend, StatsSummary, TokenUsage
+
+
+def _summary(
+    *,
+    total_cost: float,
+    cost_24h: float,
+    llm_calls: int,
+    by_model: list[ModelSpend],
+    completed: int,
+    failed: int,
+    avg_latency: float | None,
+) -> StatsSummary:
+    """Assemble the derived figures the same way for both repositories, so the
+    two implementations can never disagree on how cost-per-lead or failure-rate
+    is computed — only on how the raw counts were gathered."""
+    ceiling = settings.daily_cost_ceiling_usd
+    total_reqs = completed + failed
+    return StatsSummary(
+        total_cost_usd=round(total_cost, 6),
+        cost_usd_24h=round(cost_24h, 6),
+        leads=completed,
+        llm_calls=llm_calls,
+        cost_per_lead_usd=round(total_cost / completed, 6) if completed else 0.0,
+        by_model=by_model,
+        daily_ceiling_usd=ceiling,
+        ceiling_used_pct=round(cost_24h / ceiling * 100, 2) if ceiling else 0.0,
+        requests_completed=completed,
+        requests_failed=failed,
+        failure_rate=round(failed / total_reqs, 4) if total_reqs else 0.0,
+        avg_latency_ms=int(avg_latency) if avg_latency is not None else None,
+    )
 
 
 class Repository(Protocol):
@@ -34,6 +65,10 @@ class Repository(Protocol):
         level: str = "info",
         detail: dict[str, Any] | None = None,
     ) -> None: ...
+
+    async def stats(self) -> StatsSummary:
+        """Aggregate spend, cost-per-lead and reliability for /stats (§4.6)."""
+        ...
 
 
 class InMemoryRepository(Repository):
@@ -61,6 +96,38 @@ class InMemoryRepository(Repository):
     ) -> None:
         self.logs.append(
             {"trace_id": trace_id, "domain": domain, "stage": stage, "level": level, "detail": detail}
+        )
+
+    async def stats(self) -> StatsSummary:
+        cutoff = datetime.now(timezone.utc) - timedelta(days=1)
+        agg: dict[str, list] = {}  # model -> [calls, in, out, cost]
+        for _, u in self._usage:
+            row = agg.setdefault(u.model, [0, 0, 0, 0.0])
+            row[0] += 1
+            row[1] += u.input_tokens
+            row[2] += u.output_tokens
+            row[3] += u.cost_usd
+        by_model = [
+            ModelSpend(
+                model=m, llm_calls=r[0], input_tokens=r[1], output_tokens=r[2], cost_usd=round(r[3], 6)
+            )
+            for m, r in sorted(agg.items())
+        ]
+        completed = [e for e in self.logs if e["stage"] == "request_completed"]
+        failed = sum(1 for e in self.logs if e["stage"] == "request_failed")
+        latencies = [
+            e["detail"]["latency_ms"]
+            for e in completed
+            if e.get("detail") and "latency_ms" in e["detail"]
+        ]
+        return _summary(
+            total_cost=sum(u.cost_usd for _, u in self._usage),
+            cost_24h=sum(u.cost_usd for ts, u in self._usage if ts >= cutoff),
+            llm_calls=len(self._usage),
+            by_model=by_model,
+            completed=len(completed),
+            failed=failed,
+            avg_latency=(sum(latencies) / len(latencies)) if latencies else None,
         )
 
 
@@ -121,6 +188,50 @@ class PostgresRepository(Repository):
                 "VALUES (%s, %s, %s, %s, %s)",
                 (trace_id, domain, stage, level, Json(detail) if detail is not None else None),
             )
+
+    async def stats(self) -> StatsSummary:
+        pool = await self._get_pool()
+        async with pool.connection() as conn:
+            cur = await conn.execute(
+                "SELECT COALESCE(SUM(cost_usd), 0), COUNT(*), "
+                "COALESCE(SUM(cost_usd) FILTER (WHERE created_at > now() - interval '1 day'), 0) "
+                "FROM token_usage"
+            )
+            total_cost, llm_calls, cost_24h = await cur.fetchone()
+
+            cur = await conn.execute(
+                "SELECT model, COUNT(*), COALESCE(SUM(input_tokens), 0), "
+                "COALESCE(SUM(output_tokens), 0), COALESCE(SUM(cost_usd), 0) "
+                "FROM token_usage GROUP BY model ORDER BY model"
+            )
+            by_model = [
+                ModelSpend(
+                    model=m,
+                    llm_calls=calls,
+                    input_tokens=int(tin),
+                    output_tokens=int(tout),
+                    cost_usd=round(float(cost), 6),
+                )
+                for m, calls, tin, tout, cost in await cur.fetchall()
+            ]
+
+            cur = await conn.execute(
+                "SELECT COUNT(*) FILTER (WHERE stage = 'request_completed'), "
+                "COUNT(*) FILTER (WHERE stage = 'request_failed'), "
+                "AVG((detail->>'latency_ms')::float) FILTER (WHERE stage = 'request_completed') "
+                "FROM structured_logs"
+            )
+            completed, failed, avg_latency = await cur.fetchone()
+
+        return _summary(
+            total_cost=float(total_cost),
+            cost_24h=float(cost_24h),
+            llm_calls=int(llm_calls),
+            by_model=by_model,
+            completed=int(completed),
+            failed=int(failed),
+            avg_latency=float(avg_latency) if avg_latency is not None else None,
+        )
 
     async def close(self) -> None:
         if self._pool is not None:

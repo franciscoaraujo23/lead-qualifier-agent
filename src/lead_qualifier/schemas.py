@@ -151,3 +151,43 @@ class QualifyResponse(BaseModel):
     usage: TokenUsage
     latency_ms: int = Field(ge=0)
     qualified_at: datetime = Field(default_factory=_utcnow)
+
+
+# --- Observability (§4.6 cost, §4.5 latency/failure-rate) --------------------
+
+
+class ModelSpend(BaseModel):
+    """Per-model slice of spend. `llm_calls` counts every billed attempt,
+    including schema-repair retries, so calls > leads reveals repair overhead."""
+
+    model: str
+    llm_calls: int = Field(ge=0)
+    input_tokens: int = Field(ge=0)
+    output_tokens: int = Field(ge=0)
+    cost_usd: float = Field(ge=0.0)
+
+
+class StatsSummary(BaseModel):
+    """What `/stats` (§4.6) reports: running spend and the two numbers a technical
+    reviewer actually checks — cost per delivered lead and how the LLM behaved.
+    """
+
+    # Cost (§4.6)
+    total_cost_usd: float = Field(ge=0.0)
+    cost_usd_24h: float = Field(ge=0.0)
+    leads: int = Field(ge=0)  # requests that produced a validated result
+    llm_calls: int = Field(ge=0)  # includes repair retries; llm_calls/leads = overhead
+    # Cost per delivered lead, wasted spend on failed requests included on purpose:
+    # it answers "what did each result actually cost us", not "cost of a clean run".
+    cost_per_lead_usd: float = Field(ge=0.0)
+    by_model: list[ModelSpend] = Field(default_factory=list)
+
+    # Cost ceiling (§4.7)
+    daily_ceiling_usd: float = Field(ge=0.0)
+    ceiling_used_pct: float = Field(ge=0.0)
+
+    # Reliability (§4.5)
+    requests_completed: int = Field(ge=0)
+    requests_failed: int = Field(ge=0)
+    failure_rate: float = Field(ge=0.0, le=1.0)
+    avg_latency_ms: int | None = None

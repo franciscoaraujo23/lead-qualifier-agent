@@ -15,7 +15,7 @@ from .config import settings
 from .errors import PipelineError
 from .llm import get_provider
 from .persistence import get_repository
-from .schemas import QualifyRequest, QualifyResponse
+from .schemas import QualifyRequest, QualifyResponse, StatsSummary
 
 app = FastAPI(title="Lead Qualifier", version="0.1.0")
 
@@ -55,3 +55,11 @@ async def qualify_endpoint(
 
     trace_id = x_trace_id or str(uuid.uuid4())
     return await qualify(req.domain, provider=_provider, repo=_repo, trace_id=trace_id)
+
+
+@app.get("/stats", response_model=StatsSummary, dependencies=[Depends(verify_token)])
+async def stats_endpoint() -> StatsSummary:
+    """Running spend, cost-per-lead, and reliability (§4.6). Behind the same
+    optional token as /qualify — it exposes cost figures, so it is not left open
+    when auth is configured."""
+    return await _repo.stats()
