@@ -158,6 +158,29 @@ async def test_repaired_request_is_charged_for_every_attempt():
     assert completed["detail"]["llm_attempts"] == 2
 
 
+class ReportedCostProvider(ScriptedProvider):
+    """A provider that returns its own authoritative charge (OpenRouter does).
+    Its model id is deliberately absent from COST_TABLE, so the table would book
+    $0 — the reported figure is the only way the cost is not silently lost."""
+
+    async def complete(self, *, system, user, max_tokens=1024):
+        self.calls += 1
+        return Completion(
+            text=self._texts.pop(0),
+            usage=RawUsage("anthropic/claude-haiku-4.5", 1_000_000, 500, cost_usd=0.0075),
+        )
+
+
+async def test_provider_reported_cost_is_booked_verbatim_not_the_table():
+    provider = ReportedCostProvider([_VALID])
+    repo = InMemoryRepository()
+    resp = await pipe.qualify("acme.com", provider=provider, repo=repo, trace_id="t11")
+
+    # Table lookup for this unknown model id is $0; the reported charge is what counts.
+    assert resp.usage.cost_usd == 0.0075
+    assert await repo.daily_cost_usd() == 0.0075
+
+
 async def test_exhausted_repair_loop_still_books_its_spend():
     """Three billed calls that end in SchemaValidationError must reach the daily
     ceiling's view, or the ceiling is blind in the case it exists for."""

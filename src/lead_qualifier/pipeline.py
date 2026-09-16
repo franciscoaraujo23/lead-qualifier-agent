@@ -143,15 +143,25 @@ async def _score_with_repair(
     total = TokenUsage(model="", input_tokens=0, output_tokens=0, cost_usd=0.0)
     for attempt in range(1, settings.schema_repair_max_retries + 2):
         completion = await _complete_within_budget(provider, prompt)
+        # Prefer the provider's own reported charge when it gives one (OpenRouter):
+        # it is the actual amount billed, markup and all, so it never drifts from a
+        # local price table. Providers that report nothing (Anthropic, mock) leave
+        # cost_usd None and fall back to the table, exactly as before.
+        reported = completion.usage.cost_usd
+        spent_cost = (
+            round(reported, 6)
+            if reported is not None
+            else cost_usd(
+                completion.usage.model,
+                completion.usage.input_tokens,
+                completion.usage.output_tokens,
+            )
+        )
         spent = TokenUsage(
             model=completion.usage.model,
             input_tokens=completion.usage.input_tokens,
             output_tokens=completion.usage.output_tokens,
-            cost_usd=cost_usd(
-                completion.usage.model,
-                completion.usage.input_tokens,
-                completion.usage.output_tokens,
-            ),
+            cost_usd=spent_cost,
         )
         await repo.record_usage(trace_id=trace_id, domain=domain, usage=spent)
         total = TokenUsage(
