@@ -376,8 +376,14 @@ list price through with no per-token markup, so it mirrors the first-party row).
 
 **Verification status (be honest):** the provider has offline unit tests
 (`tests/test_openrouter_provider.py`) that construct the real httpx client and
-exercise the parse/refusal/error paths against a stubbed transport. It has **not
-yet been run against the live OpenRouter API** — that is the first real LLM call
-the project will make, and it needs `LQ_OPENROUTER_API_KEY` in `.env`. Expect the
-usual crop of things only a real endpoint reveals (exact `usage` shape, refusal
-finish reasons, latency against the 20s budget).
+exercise the parse/refusal/error paths against a stubbed transport. It has also
+now been run **once against the live OpenRouter API** — the project's first real
+LLM call: real enrichment of `stripe.com` (all four sources), then Claude Haiku
+4.5 via OpenRouter, which returned schema-valid JSON on the first attempt
+(score 15 / cold, confidence 0.95, 6.3s). The reported charge was `$0.002353`
+for 1103 in / 250 out tokens — exactly the list-price computation, confirming
+OpenRouter passes Anthropic's per-token price through with no markup (which is
+why the fallback `COST_TABLE` row mirrors the first-party one) and that the
+reported-cost path books the real figure. Two things remain unexercised against a
+live model: the schema-repair loop (the real model did not misbehave, which is
+the good case and hard to force naturally) and a refusal `finish_reason`.
