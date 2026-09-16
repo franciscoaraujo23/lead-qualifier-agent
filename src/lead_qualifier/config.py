@@ -36,6 +36,11 @@ COST_TABLE: dict[str, tuple[float, float]] = {
     "claude-haiku-4-5": (1.00, 5.00),
     "claude-sonnet-5": (2.00, 10.00),
     "claude-opus-5": (5.00, 25.00),
+    # OpenRouter reports the real charge per call (RawUsage.cost_usd), so this row
+    # is only a fallback for the rare response with no `cost` field. OpenRouter
+    # passes Anthropic's list price through with no per-token markup, so it mirrors
+    # the first-party Haiku row above.
+    "anthropic/claude-haiku-4.5": (1.00, 5.00),
     "mock": (0.0, 0.0),
 }
 
@@ -53,9 +58,13 @@ class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_prefix="LQ_", env_file=".env", extra="ignore")
 
     # --- LLM ---
-    llm_provider: str = "mock"  # "mock" | "anthropic"
+    llm_provider: str = "mock"  # "mock" | "anthropic" | "openrouter"
     llm_model: str = "claude-haiku-4-5"
     anthropic_api_key: str | None = None
+    openrouter_api_key: str | None = None
+    # OpenRouter namespaces model ids by provider. Only consulted when
+    # llm_provider=openrouter, so it does not disturb the Anthropic default above.
+    openrouter_model: str = "anthropic/claude-haiku-4.5"
 
     # --- Safety / abuse ceiling (§4.7) ---
     webhook_auth_token: str | None = None

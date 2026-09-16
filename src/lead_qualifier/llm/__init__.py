@@ -23,4 +23,14 @@ def get_provider() -> LLMProvider:
         return AnthropicProvider(
             settings.anthropic_api_key, settings.llm_model, timeout_s=settings.llm_timeout_s
         )
+    if settings.llm_provider == "openrouter":
+        from .openrouter_provider import OpenRouterProvider
+
+        if not settings.openrouter_api_key:
+            raise RuntimeError("LQ_OPENROUTER_API_KEY is required for the openrouter provider")
+        return OpenRouterProvider(
+            settings.openrouter_api_key,
+            settings.openrouter_model,
+            timeout_s=settings.llm_timeout_s,
+        )
     return MockProvider(model="mock")
