@@ -28,10 +28,21 @@ class SchemaValidationError(PipelineError):
 
 
 class LLMCallError(PipelineError):
-    """The LLM provider call itself failed (transport, auth, rate limit)."""
+    """The LLM provider call itself failed (transport, auth, rate limit, or the
+    per-call time budget ran out)."""
 
     failure_stage = "llm"
     http_status = 502
+
+
+class LLMRefusalError(PipelineError):
+    """The model declined the request. Re-sending the same prompt gets the same
+    answer, so this is a 422 that n8n does not retry, not a retryable 502, and it
+    skips the schema-repair loop, which would only re-ask twice more for nothing.
+    """
+
+    failure_stage = "llm"
+    http_status = 422
 
 
 class CostCeilingExceeded(PipelineError):

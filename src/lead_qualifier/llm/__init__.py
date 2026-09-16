@@ -20,5 +20,7 @@ def get_provider() -> LLMProvider:
 
         if not settings.anthropic_api_key:
             raise RuntimeError("LQ_ANTHROPIC_API_KEY is required for the anthropic provider")
-        return AnthropicProvider(settings.anthropic_api_key, settings.llm_model)
+        return AnthropicProvider(
+            settings.anthropic_api_key, settings.llm_model, timeout_s=settings.llm_timeout_s
+        )
     return MockProvider(model="mock")
