@@ -2,10 +2,17 @@
 repair loop, cost accounting, and the cost ceiling in isolation.
 """
 
+import asyncio
+
 import pytest
 
 import lead_qualifier.pipeline as pipe
-from lead_qualifier.errors import CostCeilingExceeded, EnrichmentEmptyError, SchemaValidationError
+from lead_qualifier.errors import (
+    CostCeilingExceeded,
+    EnrichmentEmptyError,
+    LLMCallError,
+    SchemaValidationError,
+)
 from lead_qualifier.llm.base import Completion, RawUsage
 from lead_qualifier.persistence import InMemoryRepository
 from lead_qualifier.schemas import CompanyProfile, EnrichmentSource, Tier
@@ -105,3 +112,70 @@ async def test_enrichment_empty_propagates(monkeypatch):
     provider = ScriptedProvider([_VALID])
     with pytest.raises(EnrichmentEmptyError):
         await pipe.qualify("x.com", provider=provider, repo=InMemoryRepository(), trace_id="t7")
+
+
+async def test_llm_call_over_budget_fails_fast_without_repair_attempts(monkeypatch):
+    """§4.8: the n8n node timeout is computed from this per-call budget. A call
+    that outlives it must fail as a typed error, not run on while n8n gives up
+    and re-sends."""
+    monkeypatch.setattr(pipe.settings, "llm_timeout_s", 0.05)
+
+    class HangingProvider:
+        calls = 0
+
+        async def complete(self, *, system, user, max_tokens=1024):
+            HangingProvider.calls += 1
+            await asyncio.sleep(10)
+
+    with pytest.raises(LLMCallError, match="budget"):
+        await pipe.qualify(
+            "acme.com", provider=HangingProvider(), repo=InMemoryRepository(), trace_id="t8"
+        )
+    assert HangingProvider.calls == 1, "a timeout is not a schema problem; no repair loop"
+
+
+class PricedProvider(ScriptedProvider):
+    """ScriptedProvider on a billed model. The mock model costs $0, which is
+    exactly how an accounting leak stays invisible."""
+
+    async def complete(self, *, system, user, max_tokens=1024):
+        self.calls += 1
+        return Completion(
+            text=self._texts.pop(0), usage=RawUsage("claude-haiku-4-5", 1_000_000, 0)
+        )
+
+
+async def test_repaired_request_is_charged_for_every_attempt():
+    # 2 attempts x 1M input tokens x $1/1M = $2.00, not the $1.00 of the last call.
+    provider = PricedProvider(["not json", _VALID])
+    repo = InMemoryRepository()
+    resp = await pipe.qualify("acme.com", provider=provider, repo=repo, trace_id="t9")
+
+    assert await repo.daily_cost_usd() == 2.0
+    assert resp.usage.cost_usd == 2.0
+    assert resp.usage.input_tokens == 2_000_000
+    completed = next(e for e in repo.logs if e["stage"] == "request_completed")
+    assert completed["detail"]["llm_attempts"] == 2
+
+
+async def test_exhausted_repair_loop_still_books_its_spend():
+    """Three billed calls that end in SchemaValidationError must reach the daily
+    ceiling's view, or the ceiling is blind in the case it exists for."""
+    provider = PricedProvider(["bad", "still bad", "nope"])
+    repo = InMemoryRepository()
+    with pytest.raises(SchemaValidationError):
+        await pipe.qualify("acme.com", provider=provider, repo=repo, trace_id="t10")
+    assert await repo.daily_cost_usd() == 3.0
+
+
+async def test_failed_request_leaves_a_trace():
+    provider = PricedProvider(["bad", "still bad", "nope"])
+    repo = InMemoryRepository()
+    with pytest.raises(SchemaValidationError):
+        await pipe.qualify("acme.com", provider=provider, repo=repo, trace_id="t11")
+
+    failed = [e for e in repo.logs if e["stage"] == "request_failed"]
+    assert len(failed) == 1
+    assert failed[0]["trace_id"] == "t11"
+    assert failed[0]["level"] == "error"
+    assert failed[0]["detail"] == {"failure_stage": "schema", "error": "SchemaValidationError"}
