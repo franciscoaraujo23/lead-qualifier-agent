@@ -147,7 +147,7 @@ This boundary is what makes the core reusable in the eval-harness piece and in t
 | **(b) Idempotency + DLQ store** | Postgres | One piece of infra serves idempotency, dead-letter, structured logs, and cost tracking. Reads as a deliberately-designed audit trail to a technical reviewer, not an over-engineered extra moving part (which Redis would be, for this scale, with the added downside of losing DLQ data to TTL). |
 | **(c) LLM location** | Inside FastAPI, behind an `LLMProvider` interface | Keeps n8n as pure orchestration/routing. Makes the domain service (enrichment + scoring + draft) a standalone, reusable, testable unit — required for reuse in the eval-harness piece and the internal pipeline without rebuilding. |
 | **(d) Deploy target** | Self-contained `docker-compose.yml` (n8n + FastAPI + Postgres), repo is `git clone && docker compose up` | Strongest reproducibility signal for a technical buyer: they can inspect and run the whole thing locally, not just trust a hosted demo. A live instance on your Coolify VPS can still exist as a clickable demo, running the exact same compose stack — not a separate deploy story. |
-| **(e) LLM provider** | Thin provider-agnostic interface (`LLMProvider` protocol with `.score_and_draft()`), one concrete implementation (Anthropic) wired in | Near-zero extra build cost, meaningful engineering signal (vendor lock-in awareness, mockable in tests) — without the over-engineering of actually implementing multiple providers nobody asked for. |
+| **(e) LLM provider** | Thin provider-agnostic interface (`LLMProvider` protocol), two concrete implementations (Anthropic direct, and Claude Haiku 4.5 via OpenRouter) selected by config | Near-zero extra build cost, meaningful engineering signal (vendor lock-in awareness, mockable in tests). The second implementation was added deliberately (§10) — two real providers turn "the abstraction exists" into "the abstraction demonstrably holds", at the cost of one honest divergence in cost accounting. |
 
 ## 6. Reusability contract (for the eval-harness piece and internal pipeline)
 
@@ -330,3 +330,54 @@ imported into someone else's n8n.
 ---
 
 *This document was self-reviewed after drafting: fixed a diagram/text contradiction on retry layering, closed an idempotency race (check-then-insert → atomic upsert), stopped duplicate submissions from re-firing side effects, and added webhook auth + cost ceiling, sync/async rationale, and partial-enrichment semantics. Ready to start Phase 0 on your go.*
+
+## 10. Second LLM provider (OpenRouter) — and the cost-reporting divergence
+
+§5e originally wired one concrete provider (Anthropic) behind the `LLMProvider`
+interface and called a second one over-engineering. That call was revisited: a
+second *real* implementation is cheap here and changes the claim it supports —
+from "there is an abstraction" to "the abstraction demonstrably carries a second
+vendor with different transport and a different cost story". It is added
+*alongside* Anthropic, chosen by `LQ_LLM_PROVIDER`, not in its place. The model
+stays Claude Haiku 4.5 (§8); OpenRouter is a different route to it, not a
+different model — swapping the model would be a separate decision.
+
+Three things are worth recording.
+
+**It reports the real charge, so the cost table stops being the source of truth
+for it.** §4.6 has providers stay "dumb about pricing": the pipeline multiplies
+reported tokens by a local `COST_TABLE`. That holds only because the Anthropic
+SDK does not tell us what a call cost. OpenRouter does — its `usage.cost` is the
+actual amount billed (OpenRouter credits are denominated 1:1 in USD). Booking a
+table estimate next to a provider that knows the true figure would drift from the
+real spend for no reason, in exactly the number (cost-per-lead) the piece is
+trying to be credible about. So `RawUsage` gained an optional `cost_usd`: a
+provider that returns an authoritative charge sets it and the pipeline books that
+exact amount; a provider that does not leaves it `None` and the table lookup runs
+unchanged. Anthropic and the mock are byte-identical to before. This is the one
+structural divergence from §4.6, and it strengthens rather than weakens the
+unit-economics story: the number is now measured, not estimated, whenever the
+provider lets it be.
+
+**Transport is plain HTTP, not an SDK.** OpenRouter's endpoint is
+OpenAI-compatible, so the provider uses `httpx` directly. It keeps the two
+load-bearing choices the Anthropic provider documents: an explicit per-call
+timeout (the n8n node arithmetic in §4.8 depends on it) and no client-side retry
+layer (httpx does not retry by default; §4.2's two layers stay two). A
+content-policy stop or a 200 with empty text maps to the same non-retryable
+`LLMRefusalError` (422) as an Anthropic refusal, so it skips the repair loop
+instead of burning it on malformed JSON.
+
+**Model ids are namespaced.** OpenRouter names the model
+`anthropic/claude-haiku-4.5`. That namespaced id is what gets recorded, so a cost
+row says which route actually ran. A `COST_TABLE` row for it exists only as a
+fallback for the rare response with no `cost` field (OpenRouter passes Anthropic's
+list price through with no per-token markup, so it mirrors the first-party row).
+
+**Verification status (be honest):** the provider has offline unit tests
+(`tests/test_openrouter_provider.py`) that construct the real httpx client and
+exercise the parse/refusal/error paths against a stubbed transport. It has **not
+yet been run against the live OpenRouter API** — that is the first real LLM call
+the project will make, and it needs `LQ_OPENROUTER_API_KEY` in `.env`. Expect the
+usual crop of things only a real endpoint reveals (exact `usage` shape, refusal
+finish reasons, latency against the 20s budget).

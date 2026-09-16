@@ -137,5 +137,11 @@ revealed. They are written up in [architecture.md §9](architecture.md).
 ## Configuration
 
 Copy `.env.example` to `.env`. All variables are prefixed `LQ_`. Defaults run the
-mock provider against a local Postgres; set `LQ_LLM_PROVIDER=anthropic` and
-`LQ_ANTHROPIC_API_KEY` to use a real model.
+mock provider against a local Postgres. For a real model, pick a provider:
+
+- `LQ_LLM_PROVIDER=anthropic` with `LQ_ANTHROPIC_API_KEY` — Anthropic direct.
+- `LQ_LLM_PROVIDER=openrouter` with `LQ_OPENROUTER_API_KEY` — the same Claude
+  Haiku 4.5 routed through OpenRouter, which also reports the real per-call cost.
+  Model id is namespaced (`anthropic/claude-haiku-4.5`); see
+  [architecture.md §10](architecture.md) for why there are two providers and how
+  cost accounting differs between them.
