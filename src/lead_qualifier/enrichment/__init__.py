@@ -35,10 +35,15 @@ async def enrich_domain(
         follow_redirects=True,
         headers={"User-Agent": _USER_AGENT},
     ) as client:
+        # Each source gets its own wall-clock bound. httpx's timeout is per
+        # operation (connect, each read), so a slow-dripping response or a chain
+        # of redirects can outlast it. Bounding per source rather than around the
+        # whole gather keeps §4.9 intact: a slow source fails alone instead of
+        # taking the sources that already answered down with it.
         dns_res, whois_res, site_res = await asyncio.gather(
-            lookup_dns(domain, timeout),
-            lookup_whois(domain, client),
-            fetch_site(domain, client),
+            asyncio.wait_for(lookup_dns(domain, timeout), timeout),
+            asyncio.wait_for(lookup_whois(domain, client), timeout),
+            asyncio.wait_for(fetch_site(domain, client), timeout),
             return_exceptions=True,
         )
 

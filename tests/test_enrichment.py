@@ -2,6 +2,9 @@
 orchestrator aggregation against simulated sources.
 """
 
+import asyncio
+import time
+
 import httpx
 import pytest
 
@@ -117,3 +120,24 @@ async def test_orchestrator_all_down_raises(monkeypatch):
 
     with pytest.raises(EnrichmentEmptyError):
         await enr.enrich_domain("acme.com", timeout=1.0)
+
+
+async def test_orchestrator_slow_source_fails_alone_within_bound(monkeypatch):
+    """httpx's timeout is per operation, so a slow-dripping source can outlast it.
+    The per-source bound must cut it off without discarding the fast sources."""
+
+    async def _slow_whois(domain, client):
+        await asyncio.sleep(10)
+
+    monkeypatch.setattr(enr, "lookup_dns", _fake_dns_ok)
+    monkeypatch.setattr(enr, "lookup_whois", _slow_whois)
+    monkeypatch.setattr(enr, "fetch_site", _fake_fetch_ok)
+
+    started = time.monotonic()
+    profile = await enr.enrich_domain("acme.com", timeout=0.2)
+    elapsed = time.monotonic() - started
+
+    assert elapsed < 2, f"the slow source was not cut off ({elapsed:.1f}s)"
+    assert EnrichmentSource.WHOIS in profile.sources_failed
+    assert EnrichmentSource.DNS in profile.sources_ok
+    assert EnrichmentSource.SCRAPE in profile.sources_ok
