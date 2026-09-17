@@ -6,7 +6,7 @@ WORKDIR /app
 COPY pyproject.toml ./
 COPY src ./src
 
-RUN pip install --no-cache-dir ".[api,enrich,anthropic]"
+RUN pip install --no-cache-dir ".[api,enrich,anthropic,openrouter]"
 
 EXPOSE 8000
 

@@ -28,6 +28,9 @@ services:
       LQ_LLM_PROVIDER: ${LQ_LLM_PROVIDER:-mock}
       LQ_LLM_MODEL: ${LQ_LLM_MODEL:-claude-haiku-4-5}
       LQ_ANTHROPIC_API_KEY: ${LQ_ANTHROPIC_API_KEY:-}
+      # OpenRouter provider (LQ_LLM_PROVIDER=openrouter). Empty unless set in .env.
+      LQ_OPENROUTER_API_KEY: ${LQ_OPENROUTER_API_KEY:-}
+      LQ_OPENROUTER_MODEL: ${LQ_OPENROUTER_MODEL:-anthropic/claude-haiku-4.5}
       LQ_WEBHOOK_AUTH_TOKEN: ${LQ_WEBHOOK_AUTH_TOKEN:-}
       LQ_DAILY_COST_CEILING_USD: ${LQ_DAILY_COST_CEILING_USD:-5.0}
     depends_on:
@@ -35,6 +38,13 @@ services:
         condition: service_healthy
     ports:
       - "8000:8000"
+    # The image is python-slim (no curl), so probe with the interpreter that is
+    # already there. n8n waits on this being healthy before it starts.
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8000/healthz').status==200 else 1)\""]
+      interval: 5s
+      timeout: 3s
+      retries: 10
 
   n8n:
     image: n8nio/n8n:latest
@@ -53,7 +63,7 @@ services:
       - ./n8n:/workflows:ro
     depends_on:
       api:
-        condition: service_started
+        condition: service_healthy
       postgres:
         condition: service_healthy
 
