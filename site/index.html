@@ -32,6 +32,7 @@
   p{margin:.5em 0;max-width:68ch}
   .eyebrow{font-size:.72rem;text-transform:uppercase;letter-spacing:.16em;color:var(--accent);font-weight:600}
   .lede{font-size:clamp(1.05rem,2.2vw,1.28rem);color:var(--ink)}
+  .sub{font-family:var(--serif);color:var(--muted);font-size:1.02rem;max-width:66ch;margin-top:.5em}
   .muted{color:var(--muted)}
   .mono{font-family:var(--mono)}
   a{color:var(--accent);text-underline-offset:3px}
@@ -110,7 +111,8 @@
   <header class="hero">
     <div class="eyebrow">Portfolio · systems engineering</div>
     <h1>Domain&nbsp;to&nbsp;Decision</h1>
-    <p class="lede">Give it a company domain and nothing else. It returns an enriched profile, a scored lead, a drafted outreach message, and a routing decision — and every step is traceable in SQL. The point isn't the LLM call; it's the orchestration discipline around it.</p>
+    <p class="lede">Hand it a company's web domain — nothing else. It researches the company from public sources, scores how promising a sales lead it is, drafts a first outreach message, and decides how to route it. Automatically, at roughly a fifth of a cent per lead, with every step auditable afterwards.</p>
+    <p class="sub">The hard part was never asking a model for a score — it's making that one call reliable, deduplicated, cost-bounded and traceable in production. What follows is a walkthrough of the engineering around the call, not the call itself.</p>
     <div class="status-line">
       <span class="chip"><span class="dot"></span>Live, end-to-end</span>
       <span class="chip">FastAPI · n8n · Postgres</span>
