@@ -115,13 +115,18 @@ curl -X POST localhost:5678/webhook/lead   -H 'content-type: application/json'  
 | Missing/malformed domain | `400` | `invalid_domain` | ✅ live |
 | Same key while the first run is working | `409` | `duplicate_in_flight` | ✅ live |
 | API unreachable or typed error, retries exhausted | the API's own status (`422`/`502`/`503`) | failure `stage`, `attempts`, and the `dead_letter_id` to look up | ✅ live |
-| Qualified | `200` | the API's validated `QualifyResponse` | ⏳ needs a reachable API |
-| Same key replayed after success | `200` | the **stored** result — routing is skipped, so no duplicate hot-path side effect | ⏳ needs a reachable API |
+| Qualified | `200` | the API's validated `QualifyResponse` | ✅ live |
+| Same key replayed after success | `200` | the **stored** result — routing is skipped, so no duplicate hot-path side effect | ✅ live |
 
-The four verified rows were exercised against a live n8n instance backed by a
-real Postgres. The concurrency one is the interesting one: a second submission
-arriving 4s into a 25s run was answered `409` in 0.6s, having started no second
-pipeline. The two pending rows need `/qualify` running somewhere n8n can reach.
+All six rows were exercised against a live n8n instance backed by real Postgres
+(Neon), calling a deployed FastAPI service scoring with a real model (Claude
+Haiku 4.5 via OpenRouter). Two are worth calling out. The concurrency row: a
+second submission arriving 4s into a 25s run was answered `409` in 0.6s, having
+started no second pipeline. The cache-replay row: the same key submitted twice
+returned a fresh `200` in ~8s the first time and the **stored** `200` in 0.65s
+the second, and `token_usage` held exactly **one** row for the key afterwards —
+the replay re-ran nothing and spent nothing. Tier routing was exercised in the
+same run (a `cold` result took the cold branch to the no-op it documents).
 
 The SQL behind all of this has its own tests —
 [`tests/test_idempotency_sql.py`](tests/test_idempotency_sql.py) reads the
