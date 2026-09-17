@@ -8,6 +8,9 @@ Everything stated here is live-verified; nothing is aspirational. Keep it that w
 
 # Lead Qualification Agent — case study
 
+> The polished, canonical version is the published page: https://claude.ai/artifact/RyPTu6zr6sD2FZLgdQJFE8
+> This markdown is the source notes / outline behind it.
+
 **Give it a company domain. Get back an enriched profile, a scored lead, a drafted
 outreach message, and a routing decision — with every step traceable in SQL.**
 
