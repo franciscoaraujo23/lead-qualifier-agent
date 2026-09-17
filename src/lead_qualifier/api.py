@@ -26,8 +26,13 @@ _provider = get_provider()
 async def verify_token(x_auth_token: str | None = Header(default=None)) -> None:
     """Shared-secret auth (§4.7). No-op if no token is configured, so the demo
     runs open locally; set LQ_WEBHOOK_AUTH_TOKEN to require it.
+
+    "No token configured" means falsy, not just None: docker compose passes
+    `LQ_WEBHOOK_AUTH_TOKEN: ${LQ_WEBHOOK_AUTH_TOKEN:-}`, which arrives as an empty
+    string when unset. Treating "" as None keeps a keyless `docker compose up`
+    open, instead of rejecting every request against a token nobody set.
     """
-    if settings.webhook_auth_token is None:
+    if not settings.webhook_auth_token:
         return
     if x_auth_token != settings.webhook_auth_token:
         raise HTTPException(status_code=401, detail="invalid or missing auth token")

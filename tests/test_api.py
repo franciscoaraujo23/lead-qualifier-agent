@@ -84,6 +84,16 @@ def test_stats_reflects_a_qualified_lead(monkeypatch, client):
     assert body["avg_latency_ms"] is not None
 
 
+def test_empty_token_means_open_not_locked(monkeypatch, client):
+    """docker compose passes an empty string when no token is set. Treated as
+    None it would be a real token nobody knows, and a keyless `docker compose up`
+    would answer 401 to every request. Empty must mean open."""
+    from lead_qualifier.api import settings
+    monkeypatch.setattr(settings, "webhook_auth_token", "")
+    r = client.post("/qualify", json={"domain": "acme.com"})
+    assert r.status_code == 200
+
+
 def test_stats_is_behind_auth(monkeypatch, client):
     from lead_qualifier.api import settings as api_settings
     monkeypatch.setattr(api_settings, "webhook_auth_token", "secret")
