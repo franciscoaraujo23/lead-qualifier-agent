@@ -47,7 +47,10 @@ services:
       retries: 10
 
   n8n:
-    image: n8nio/n8n:latest
+    # Pinned, not :latest — a floating tag can ship a node version that rejects
+    # the imported workflow on a fresh `docker compose up`. 2.39.7 is the version
+    # this stack was verified against.
+    image: n8nio/n8n:2.39.7
     environment:
       N8N_SECURE_COOKIE: "false"
       GENERIC_TIMEZONE: Europe/Lisbon
