@@ -342,6 +342,7 @@ request_completed     {score: 8, cost_usd: 0.002112,
     <h2>Clone and run</h2>
     <p>The stack is a self-contained <code>docker compose up</code> — Postgres (schema auto-created), the API, and n8n — defaulting to a deterministic mock provider so a reviewer verifies the whole core on a clean machine with no keys. Point it at a real model with two environment variables.</p>
     <p class="muted">Live instance: the API runs at <a href="https://lead-qualifier-api.franciscoaraujo.eu/healthz">lead-qualifier-api.franciscoaraujo.eu</a> — the health check is open, while <code>/qualify</code> and <code>/stats</code> sit behind the shared-secret token, by design.</p>
+    <p class="muted">Code &amp; full write-up: <a href="https://github.com/franciscoaraujo23/lead-qualifier-agent">github.com/franciscoaraujo23/lead-qualifier-agent</a> — the README, the architecture notes (every decision, and the five the implementation only found by running it), and the n8n workflow JSON.</p>
     <div class="stack">
       <span>Python</span><span>FastAPI</span><span>Pydantic</span><span>Postgres · Neon</span><span>n8n</span><span>Docker Compose</span><span>OpenRouter</span><span>Coolify</span>
     </div>
