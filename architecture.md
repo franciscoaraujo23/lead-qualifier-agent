@@ -128,6 +128,7 @@ This boundary is what makes the core reusable in the eval-harness piece and in t
   2. **Rate limit**: per-token (or per-IP for the open demo) request cap over a window, enforced at the n8n edge, returning `429` when exceeded.
   3. **Global daily cost ceiling**: a cheap `SELECT SUM(cost_usd) FROM token_usage WHERE created_at > now() - interval '1 day'` gate before the LLM call; over budget → `503` with a clear message. This bounds worst-case spend even if auth and rate limit are both bypassed, and doubles as a visible unit-economics guardrail in the demo.
 - **Why it matters for the piece**: the cost ceiling in particular converts "I track cost" (§4.6) into "I act on cost" — a stronger signal at almost no extra build cost.
+- **Verified live**: with the ceiling temporarily set to `$0.003`, two qualifications ran (~$0.0021 each) and the next two returned `503 cost_ceiling` in ~0.75s — an order of magnitude faster than a real qualification, because the gate is checked before enrichment and the LLM, so a blocked request spends nothing. n8n treated the `503` as non-retryable and dead-lettered it with `failure_stage = cost_ceiling`, returning the typed status and a `dead_letter_id`. The ceiling was then restored and a normal request returned `200`.
 
 ### 4.8 Synchronous vs asynchronous processing
 - **Decision**: **synchronous** `/qualify` for this piece. Enrichment + one LLM call realistically completes within a webhook's timeout budget, and a synchronous request keeps the demo legible — one request in, one enriched decision out, no polling.
