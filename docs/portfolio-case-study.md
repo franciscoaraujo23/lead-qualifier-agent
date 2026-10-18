@@ -8,7 +8,7 @@ Everything stated here is live-verified; nothing is aspirational. Keep it that w
 
 # Lead Qualification Agent — case study
 
-> The polished, canonical version is the published page: https://lead-qualifier.franciscoaraujo.eu
+> The polished, canonical version is the published page: https://franciscoaraujo.eu/projetos/lead-qualifier/
 > This markdown is the source notes / outline behind it.
 
 **Give it a company domain. Get back an enriched profile, a scored lead, a drafted

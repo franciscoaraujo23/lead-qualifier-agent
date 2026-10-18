@@ -8,7 +8,9 @@ against a schema, and routes the result by score — with idempotency, retries,
 dead-lettering, structured logs, and token-cost tracking around it.
 
 The design and the reasoning behind every decision live in
-[architecture.md](architecture.md). This README covers running it.
+[architecture.md](architecture.md). This README covers running it. The case study,
+with the results from the live instance, is at
+[franciscoaraujo.eu/projetos/lead-qualifier](https://franciscoaraujo.eu/projetos/lead-qualifier/).
 
 ## Status
 
@@ -79,7 +81,7 @@ src/lead_qualifier/     reusable core (importable as a package)
 migrations/001_init.sql Postgres: idempotency, dead_letters, logs, token_usage
 n8n/                    orchestration workflows (importable JSON)
 tests/                  offline suite (mock LLM, in-memory repo) + one Postgres test
-docs/, site/            the case study page served at lead-qualifier.franciscoaraujo.eu
+docs/                   outline notes behind the published case study
 ```
 
 ## The n8n workflow
