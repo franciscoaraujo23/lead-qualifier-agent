@@ -81,7 +81,6 @@ src/lead_qualifier/     reusable core (importable as a package)
 migrations/001_init.sql Postgres: idempotency, dead_letters, logs, token_usage
 n8n/                    orchestration workflows (importable JSON)
 tests/                  offline suite (mock LLM, in-memory repo) + one Postgres test
-docs/                   outline notes behind the published case study
 ```
 
 ## The n8n workflow
