@@ -1,0 +1,44 @@
+name: tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  pytest:
+    runs-on: ubuntu-latest
+
+    # A real Postgres, so the idempotency SQL and race tests run here instead of
+    # skipping as they do on a machine without a database.
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: lq
+          POSTGRES_PASSWORD: lq
+          POSTGRES_DB: lead_qualifier
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U lq -d lead_qualifier"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    env:
+      LQ_DATABASE_URL: postgresql://lq:lq@localhost:5432/lead_qualifier
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install
+        run: pip install -e ".[dev,api,anthropic]"
+
+      - name: Test
+        run: pytest -rs

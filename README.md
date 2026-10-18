@@ -1,5 +1,7 @@
 # Lead Qualification Agent
 
+[![tests](https://github.com/franciscoaraujo23/lead-qualifier-agent/actions/workflows/tests.yml/badge.svg)](https://github.com/franciscoaraujo23/lead-qualifier-agent/actions/workflows/tests.yml)
+
 Give it a company **domain** and nothing else. It enriches from public sources,
 scores the lead with an LLM, drafts an outreach message, validates that output
 against a schema, and routes the result by score — with idempotency, retries,
@@ -66,14 +68,18 @@ curl localhost:8000/stats
 
 ```
 src/lead_qualifier/     reusable core (importable as a package)
+  api.py                FastAPI surface: /qualify, /stats, /healthz
+  pipeline.py           enrichment -> LLM -> schema-validated result
   schemas.py            payload contracts (single source of truth)
   config.py             thresholds, cost table, safety limits
   errors.py             typed errors -> HTTP status + dead-letter stage
-  enrichment.py         enrichment interface (stubbed in Phase 0)
-  llm/                  provider-agnostic LLM interface + mock provider
+  persistence.py        repository boundary: Postgres + in-memory
+  enrichment/           best-effort sources: DNS, RDAP, site scrape, tech fingerprint
+  llm/                  provider-agnostic interface: Anthropic, OpenRouter, mock
 migrations/001_init.sql Postgres: idempotency, dead_letters, logs, token_usage
 n8n/                    orchestration workflows (importable JSON)
-tests/                  contract tests
+tests/                  offline suite (mock LLM, in-memory repo) + one Postgres test
+docs/, site/            the case study page served at lead-qualifier.franciscoaraujo.eu
 ```
 
 ## The n8n workflow
